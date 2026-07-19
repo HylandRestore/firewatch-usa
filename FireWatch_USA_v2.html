@@ -248,7 +248,7 @@ input[type=range]{accent-color:var(--ember)}
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 const $ = id => document.getElementById(id);
-const FN_SERVER = 'http://localhost:3001';
+const FN_SERVER = 'https://firewatch-usa.onrender.com';
 const FIRMS_KEY = 'c8d56a15ea6da5c3c33a3fcd2fce0dc0';
 let map, layers = {};
 let fires = [], fnIncidents = [], aqiStations = [], perimeterLayer;
@@ -618,7 +618,7 @@ async function geocodeFNAddress(inc) {
 }
 
 async function fetchFNIncidents() {
-try { const r = await fetch('http://localhost:3001/fn-incidents'); const data = await r.json(); if(data.incidents&&data.incidents.length>0){const parsed=data.incidents.map(i=>parseFNPayload({id:i._lastEventId,eventType:i._lastEventType,occurredAt:i._lastEventAt,data:i})); Promise.all(parsed.map(p=>geocodeFNAddress(p))).then(geo=>{fnIncidents=[...geo.filter(g=>g.lat),...fnIncidents];renderFNLayer();renderFireList();});} } catch(e) { console.warn('FN server',e); }
+try { const r = await fetch('https://firewatch-usa.onrender.com/fn-incidents'); const data = await r.json(); if(data.incidents&&data.incidents.length>0){const parsed=data.incidents.map(i=>parseFNPayload({id:i._lastEventId,eventType:i._lastEventType,occurredAt:i._lastEventAt,data:i})); Promise.all(parsed.map(p=>geocodeFNAddress(p))).then(geo=>{fnIncidents=[...geo.filter(g=>g.lat),...fnIncidents];renderFNLayer();renderFireList();});} } catch(e) { console.warn('FN server',e); }
   // FN is webhook-based (push), not poll-based.
   // Simulate the three real sample payloads from the spec for demo purposes.
   // In production: POST arrives at your server → verify HMAC-SHA256 signature
