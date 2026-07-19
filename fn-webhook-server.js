@@ -31,7 +31,14 @@ const sseClients = new Set();
 app.use((req, res, next) => {
   if (req.path === '/fn-webhook') {
     let buf = '';
+    if (req.path === '/fn-webhook') {
+    let buf = '';
+    req.setEncoding('utf8');
     req.on('data', chunk => { buf += chunk; });
+    req.on('end', () => { req.rawBody = buf; req.body = JSON.parse(buf || '{}'); next(); });
+  } else {
+    next();
+  }req.on('data', chunk => { buf += chunk; });
     req.on('end', () => { req.rawBody = buf; next(); });
   } else {
     next();
