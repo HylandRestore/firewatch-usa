@@ -1,0 +1,12 @@
+{
+  "name": "firewatch-usa",
+  "version": "1.0.0",
+  "description": "FireWatch USA - Live Fire Intelligence Platform",
+  "main": "fn-webhook-server.js",
+  "scripts": {
+    "start": "node fn-webhook-server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}

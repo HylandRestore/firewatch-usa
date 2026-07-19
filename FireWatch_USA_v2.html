@@ -1,0 +1,1125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>FireWatch USA — Live Fire Intelligence</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#0a0a0f;--panel:#0d0d1c;--border:#1e1e30;--border2:#2a2a40;
+  --text:#e0e0e8;--muted:#6a6a88;--faint:#33334a;
+  --ember:#ff4e0d;--amber:#FFB800;--orange:#FF6B00;--red:#FF1744;--dkred:#C62828;
+  --teal:#00C9A7;--blue:#378ADD;--green:#3B6D11;--purple:#7F77DD;
+  --smoke:#ff4e0d;--aqi-good:#00e400;--aqi-mod:#ffff00;--aqi-usg:#ff7e00;
+  --aqi-unhl:#ff0000;--aqi-vunhl:#8f3f97;--aqi-haz:#7e0023;
+}
+body{background:var(--bg);color:var(--text);font-family:'JetBrains Mono',monospace,system-ui;overflow:hidden;height:100vh;display:flex;flex-direction:column}
+#app{display:flex;flex-direction:column;height:100vh;overflow:hidden}
+#topbar{display:flex;align-items:center;gap:12px;padding:8px 14px;background:var(--panel);border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap}
+#title{font-size:13px;font-weight:700;color:var(--ember);letter-spacing:.1em;text-transform:uppercase}
+.pulse{width:8px;height:8px;border-radius:50%;background:var(--ember);animation:pulse 1.4s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+#status-bar{font-size:10px;color:var(--muted);margin-left:auto}
+.top-badge{padding:3px 8px;border-radius:4px;font-size:10px;border:1px solid var(--border2);color:var(--muted);cursor:default}
+.top-badge.active{border-color:var(--ember);color:var(--ember)}
+#body{display:flex;flex:1;overflow:hidden}
+#panel{width:250px;flex-shrink:0;background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
+#map-wrap{flex:1;position:relative}
+#map{width:100%;height:100%}
+.section{padding:9px 12px;border-bottom:1px solid var(--border)}
+.slabel{font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint);margin-bottom:7px}
+.frow{display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;font-size:11px;color:#9090aa}
+.tog{position:relative;width:32px;height:18px;cursor:pointer}
+.tog input{opacity:0;width:0;height:0}
+.tslider{position:absolute;inset:0;background:#222233;border-radius:18px;transition:.2s}
+.tslider:before{content:'';position:absolute;left:2px;top:2px;width:14px;height:14px;border-radius:50%;background:#44445a;transition:.2s}
+.tog input:checked+.tslider{background:#ff4e0d44}
+.tog input:checked+.tslider:before{transform:translateX(14px);background:var(--ember)}
+.fire-list{flex:1;overflow-y:auto}
+.fire-list::-webkit-scrollbar{width:3px}
+.fire-list::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px}
+.fitem{padding:7px 12px;border-bottom:1px solid #14141f;cursor:pointer;transition:background .15s}
+.fitem:hover{background:#141428}
+.fitem.active{background:#1a0a00;border-left:2px solid var(--ember)}
+.fname{font-size:11px;color:var(--text);font-weight:600}
+.fmeta{font-size:10px;color:var(--muted);margin-top:1px}
+.fbar{height:3px;border-radius:2px;margin-top:3px;background:#1e1e30}
+.fbfill{height:100%;border-radius:2px}
+#drawer{position:absolute;right:0;top:0;bottom:0;width:270px;background:#0d0d1cee;border-left:1px solid var(--border);padding:14px;overflow-y:auto;transform:translateX(100%);transition:transform .25s;z-index:1000}
+#drawer.open{transform:translateX(0)}
+#drawer-close{position:absolute;top:10px;right:10px;cursor:pointer;background:none;border:none;color:#9090aa;font-size:18px}
+.dtitle{font-size:13px;font-weight:700;color:var(--ember);margin-bottom:3px;margin-right:24px}
+.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin:9px 0}
+.stat{background:#141420;border-radius:6px;padding:7px 9px}
+.stat-l{font-size:9px;color:var(--faint);text-transform:uppercase;letter-spacing:.1em}
+.stat-v{font-size:15px;font-weight:700;margin-top:2px}
+.tsect{margin-top:10px}
+.tlabel{font-size:9px;color:var(--faint);text-transform:uppercase;letter-spacing:.1em;margin-bottom:5px}
+.titem{display:flex;align-items:center;gap:7px;padding:4px 0;border-bottom:1px solid var(--border);font-size:10px;color:#8080a0}
+.tdot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+#legend{position:absolute;bottom:30px;left:12px;background:#0d0d1ccc;border:1px solid var(--border);border-radius:6px;padding:8px 10px;z-index:999;font-size:10px;pointer-events:none}
+.leg-row{display:flex;align-items:center;gap:6px;margin-bottom:3px;color:#8080a0}
+.leg-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0}
+#wind-badge{position:absolute;top:12px;right:12px;background:#0d0d1ccc;border:1px solid var(--border);border-radius:6px;padding:8px 10px;z-index:999;font-size:10px;min-width:130px}
+#aqi-badge{position:absolute;top:12px;left:270px;background:#0d0d1ccc;border:1px solid var(--border);border-radius:6px;padding:8px 10px;z-index:999;font-size:10px;min-width:130px}
+#loading{position:absolute;inset:0;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:2000}
+.spinner{width:40px;height:40px;border:2px solid var(--border);border-top-color:var(--ember);border-radius:50%;animation:spin .8s linear infinite;margin-bottom:14px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.load-text{font-size:11px;color:var(--muted)}
+.load-step{font-size:11px;color:var(--ember);margin-top:4px}
+#api-modal{display:none;position:absolute;inset:0;background:#0a0a0fcc;z-index:3000;align-items:center;justify-content:center}
+#api-modal.open{display:flex}
+.modal-box{background:var(--panel);border:1px solid var(--border2);border-radius:10px;padding:24px;width:440px;max-width:90vw}
+.modal-title{font-size:14px;font-weight:700;color:var(--ember);margin-bottom:4px}
+.modal-sub{font-size:11px;color:var(--muted);margin-bottom:16px}
+.modal-field{margin-bottom:12px}
+.modal-field label{display:block;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px}
+.modal-field input{width:100%;background:#141420;border:1px solid var(--border2);border-radius:5px;padding:7px 10px;font-size:11px;color:var(--text);font-family:monospace;outline:none}
+.modal-field input:focus{border-color:var(--ember)}
+.modal-btns{display:flex;gap:8px;margin-top:16px}
+.mbtn{padding:7px 16px;border-radius:5px;font-size:11px;cursor:pointer;border:1px solid var(--border2);background:transparent;color:var(--text);font-family:monospace;transition:background .15s}
+.mbtn:hover{background:#1e1e30}
+.mbtn.primary{background:var(--ember);border-color:var(--ember);color:#fff}
+.mbtn.primary:hover{background:#e03000}
+.api-status{display:flex;align-items:center;gap:5px;font-size:10px;color:var(--muted);margin-top:8px}
+.api-dot{width:7px;height:7px;border-radius:50%;background:var(--faint)}
+.api-dot.ok{background:var(--aqi-good)}
+.api-dot.err{background:var(--red)}
+#alert-feed{position:absolute;bottom:30px;right:12px;width:240px;z-index:999;display:flex;flex-direction:column;gap:6px;pointer-events:none}
+.alert-item{background:#0d0d1cf0;border:1px solid var(--border);border-left:3px solid var(--ember);border-radius:5px;padding:8px 10px;font-size:10px;animation:slideIn .3s ease;pointer-events:all}
+.alert-item.aqi{border-left-color:var(--aqi-usg)}
+.alert-item.struct{border-left-color:var(--amber)}
+@keyframes slideIn{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:translateX(0)}}
+.alert-title{font-size:11px;font-weight:700;color:var(--text);margin-bottom:2px}
+.alert-body{color:var(--muted)}
+.fnbadge{padding:2px 6px;border-radius:3px;font-size:9px;font-weight:700;background:#0f1a0a;border:1px solid #2a4a1a;color:#6ada6a;margin-left:6px}
+.aqi-bar{height:4px;border-radius:2px;margin-top:4px;background:linear-gradient(to right,#00e400,#ffff00,#ff7e00,#ff0000,#8f3f97,#7e0023)}
+.aqi-marker{width:2px;height:8px;background:#fff;border-radius:1px;position:absolute;top:-2px;transition:left .3s}
+.aqi-wrap{position:relative;height:4px;margin-top:6px}
+.fn-struct-icon{width:8px;height:8px;background:var(--amber);border-radius:1px;flex-shrink:0}
+.perimeter-legend{width:16px;height:4px;border-radius:1px;background:transparent;border:1px solid #ff6b00;flex-shrink:0}
+input[type=range]{accent-color:var(--ember)}
+.section-tabs{display:flex;gap:0;border-bottom:1px solid var(--border)}
+.stab{flex:1;padding:7px 4px;font-size:10px;text-align:center;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;transition:all .15s}
+.stab.active{color:var(--ember);border-bottom-color:var(--ember)}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="topbar">
+    <div class="pulse"></div>
+    <div id="title">FireWatch USA</div>
+    <span class="top-badge active" id="badge-firms">NASA FIRMS</span>
+    <span class="top-badge" id="badge-nifc">NIFC</span>
+    <span class="top-badge" id="badge-nws">NWS Wind</span>
+    <span class="top-badge" id="badge-aqi">AirNow AQI</span>
+    <span class="top-badge" id="badge-osm">OSM Structures</span>
+    <span class="top-badge" id="badge-fn" style="cursor:pointer" onclick="openApiModal()">FireNotification <span class="fnbadge">API</span></span>
+    <div id="status-bar">Initializing…</div>
+  </div>
+  <div id="body">
+    <div id="panel">
+      <div class="section">
+        <div class="slabel">Map layers</div>
+        <div class="frow">Active fires <label class="tog"><input type="checkbox" id="tog-fires" checked><span class="tslider"></span></label></div>
+        <div class="frow">Fire perimeters <label class="tog"><input type="checkbox" id="tog-perim" checked><span class="tslider"></span></label></div>
+        <div class="frow">Wind vectors <label class="tog"><input type="checkbox" id="tog-wind" checked><span class="tslider"></span></label></div>
+        <div class="frow">Smoke plumes <label class="tog"><input type="checkbox" id="tog-smoke" checked><span class="tslider"></span></label></div>
+        <div class="frow">AQI stations <label class="tog"><input type="checkbox" id="tog-aqi" checked><span class="tslider"></span></label></div>
+        <div class="frow">Structures at risk <label class="tog"><input type="checkbox" id="tog-struct" checked><span class="tslider"></span></label></div>
+        <div class="frow">Structural fires <label class="tog"><input type="checkbox" id="tog-fn" checked><span class="tslider"></span></label></div>
+      </div>
+      <div class="section">
+        <div class="slabel">Fire type</div>
+        <div class="frow">Wildfire <label class="tog"><input type="checkbox" id="tog-wf" checked><span class="tslider"></span></label></div>
+        <div class="frow">Structural <label class="tog"><input type="checkbox" id="tog-sf" checked><span class="tslider"></span></label></div>
+        <div class="frow">FN incidents <label class="tog"><input type="checkbox" id="tog-fntype" checked><span class="tslider"></span></label></div>
+      </div>
+      <div class="section">
+        <div class="slabel">Smoke reach model</div>
+        <div class="frow" style="flex-direction:column;align-items:flex-start;gap:5px">
+          <div style="display:flex;justify-content:space-between;width:100%;font-size:10px;color:var(--muted)"><span>Wind multiplier</span><span id="wm-val">1.0×</span></div>
+          <input type="range" min="1" max="30" value="10" step="1" id="wind-mult" style="width:100%">
+          <div style="display:flex;justify-content:space-between;width:100%;font-size:10px;color:var(--muted)"><span>Stability class</span><span id="sc-val">Neutral</span></div>
+          <input type="range" min="1" max="5" value="3" step="1" id="stab-class" style="width:100%">
+        </div>
+      </div>
+      <div class="section" style="flex-shrink:0">
+        <div class="slabel">Active incidents (<span id="fw-count">—</span>)</div>
+        <div class="section-tabs">
+          <div class="stab active" onclick="switchTab('fires')">Wildfires</div>
+          <div class="stab" onclick="switchTab('struct')">Structural</div>
+          <div class="stab" onclick="switchTab('fn')">FN Feed</div>
+        </div>
+      </div>
+      <div class="fire-list" id="fire-list"></div>
+    </div>
+
+    <div id="map-wrap">
+      <div id="loading">
+        <div class="spinner"></div>
+        <div class="load-text">Loading fire intelligence…</div>
+        <div class="load-step" id="load-step">Starting up</div>
+      </div>
+
+      <div id="map"></div>
+
+      <div id="legend">
+        <div style="font-size:9px;color:var(--faint);text-transform:uppercase;letter-spacing:.1em;margin-bottom:5px">Fire intensity (FRP MW)</div>
+        <div class="leg-row"><div class="leg-dot" style="background:#FFB800"></div>&lt;100 MW — Low</div>
+        <div class="leg-row"><div class="leg-dot" style="background:#FF6B00"></div>100–500 — Moderate</div>
+        <div class="leg-row"><div class="leg-dot" style="background:#FF1744"></div>500–1500 — High</div>
+        <div class="leg-row"><div class="leg-dot" style="background:#C62828"></div>&gt;1500 — Extreme</div>
+        <div class="leg-row" style="margin-top:5px"><div class="perimeter-legend"></div>NIFC perimeter</div>
+        <div class="leg-row"><div class="leg-dot" style="background:#00C9A7;border-radius:2px"></div>Wind vector</div>
+        <div class="leg-row"><div style="width:9px;height:9px;background:#ff4e0d22;border:1px solid #ff4e0d66;flex-shrink:0"></div>Smoke zone</div>
+        <div class="leg-row"><div class="leg-dot" style="background:#FFB800"></div>Structure at risk</div>
+        <div class="leg-row"><div class="leg-dot" style="background:#a855f7"></div>FN structural incident</div>
+        <div class="leg-row" style="margin-top:5px">
+          <div style="display:flex;gap:3px">
+            <div style="width:12px;height:9px;background:var(--aqi-good);border-radius:1px"></div>
+            <div style="width:12px;height:9px;background:var(--aqi-mod);border-radius:1px"></div>
+            <div style="width:12px;height:9px;background:var(--aqi-usg);border-radius:1px"></div>
+            <div style="width:12px;height:9px;background:var(--aqi-unhl);border-radius:1px"></div>
+            <div style="width:12px;height:9px;background:var(--aqi-vunhl);border-radius:1px"></div>
+          </div>
+          AQI stations
+        </div>
+      </div>
+
+      <div id="wind-badge">
+        <div style="font-size:9px;color:var(--faint);text-transform:uppercase;letter-spacing:.1em;margin-bottom:3px">Surface Wind</div>
+        <div id="wind-info" style="color:var(--teal);font-size:12px;font-weight:700">—</div>
+        <div id="wind-src" style="font-size:9px;color:var(--faint);margin-top:1px">NWS Grid</div>
+      </div>
+
+      <div id="aqi-badge">
+        <div style="font-size:9px;color:var(--faint);text-transform:uppercase;letter-spacing:.1em;margin-bottom:3px">Regional AQI</div>
+        <div id="aqi-val" style="font-size:12px;font-weight:700;color:#ccc">—</div>
+        <div id="aqi-cat" style="font-size:9px;color:var(--faint);margin-top:1px">Loading…</div>
+        <div class="aqi-wrap">
+          <div class="aqi-bar" style="width:100%;height:4px;border-radius:2px;background:linear-gradient(to right,#00e400 0%,#ffff00 17%,#ff7e00 34%,#ff0000 51%,#8f3f97 68%,#7e0023 85%)"></div>
+          <div class="aqi-marker" id="aqi-marker" style="left:0%"></div>
+        </div>
+      </div>
+
+      <div id="alert-feed"></div>
+
+      <div id="drawer">
+        <button id="drawer-close" onclick="closeDrawer()">✕</button>
+        <div id="drawer-content"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="api-modal">
+  <div class="modal-box">
+    <div class="modal-title">API Credentials</div>
+    <div class="modal-sub">Enter your API keys to enable live data sources. Keys are stored in localStorage only.</div>
+    <div class="modal-field">
+      <label>AirNow API Key <a href="https://docs.airnowapi.org/account/request" target="_blank" style="color:var(--blue);font-size:9px">(get free key)</a></label>
+      <input type="text" id="key-airnow" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+      <div class="api-status"><div class="api-dot" id="dot-airnow"></div><span id="status-airnow">Not configured</span></div>
+    </div>
+    <div class="modal-field">
+      <label>FireNotification Webhook Secret <a href="https://www.firenotification.com" target="_blank" style="color:var(--blue);font-size:9px">(from your FN dashboard)</a></label>
+      <input type="text" id="key-fn" placeholder="Your FN webhook signing secret">
+      <div class="api-status"><div class="api-dot" id="dot-fn"></div><span id="status-fn">FN uses webhooks — see setup guide below</span></div>
+    </div>
+    <div class="modal-field">
+      <label>Your webhook receiver URL (register this in FN dashboard)</label>
+      <input type="text" id="key-fn-webhook" placeholder="https://your-server.com/fn-webhook">
+      <div style="font-size:9px;color:var(--faint);margin-top:5px;line-height:1.5">
+        FireNotification POSTs to your URL on every incident event.<br>
+        FN signs each request with HMAC-SHA256 via X-FN-Signature header.<br>
+        Run the included <strong style="color:var(--text)">fn-webhook-server.js</strong> to receive live incidents.
+      </div>
+    </div>
+    <div class="modal-btns">
+      <button class="mbtn" onclick="closeApiModal()">Cancel</button>
+      <button class="mbtn primary" onclick="saveApiKeys()">Save and connect</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const FN_SERVER = 'http://localhost:3001';
+const FIRMS_KEY = 'c8d56a15ea6da5c3c33a3fcd2fce0dc0';
+let map, layers = {};
+let fires = [], fnIncidents = [], aqiStations = [], perimeterLayer;
+let windData = { speed:12, dir:225, gust:0, source:'Model estimate' };
+let selectedFire = null;
+let currentTab = 'fires';
+let apiKeys = { airnow: '', fn: '', fnWebhook: '' };
+let alertCount = 0;
+let stabilityLabels = ['Very Unstable','Unstable','Neutral','Stable','Very Stable'];
+
+function loadApiKeys() {
+  try {
+    const s = localStorage.getItem('firewatch_keys');
+    if (s) apiKeys = { ...apiKeys, ...JSON.parse(s) };
+  } catch(e) {}
+}
+function saveApiKeys() {
+  apiKeys.airnow = $('key-airnow').value.trim();
+  apiKeys.fn = $('key-fn').value.trim();
+  apiKeys.fnWebhook = $('key-fn-webhook').value.trim();
+  try { localStorage.setItem('firewatch_keys', JSON.stringify(apiKeys)); } catch(e) {}
+  closeApiModal();
+  if (apiKeys.airnow) fetchAQI();
+  if (apiKeys.fn) fetchFNIncidents();
+}
+function openApiModal() {
+  $('key-airnow').value = apiKeys.airnow;
+  $('key-fn').value = apiKeys.fn;
+  $('key-fn-webhook').value = apiKeys.fnWebhook;
+  $('api-modal').classList.add('open');
+}
+function closeApiModal() { $('api-modal').classList.remove('open'); }
+
+function setStep(t) { $('load-step').textContent = t; }
+function setStatus(t) { $('status-bar').textContent = t; }
+function setBadge(id, active) { $(id).classList.toggle('active', active); }
+
+function frpColor(f) {
+  if (f > 1500) return '#C62828';
+  if (f > 500)  return '#FF1744';
+  if (f > 100)  return '#FF6B00';
+  return '#FFB800';
+}
+function frpRadius(f) {
+  if (f > 1500) return 16; if (f > 500) return 12;
+  if (f > 100)  return 8;  return 5;
+}
+function degToCompass(d) {
+  const dirs=['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+  return dirs[Math.round(d/22.5)%16];
+}
+function formatDur(h) {
+  if (h < 24) return Math.round(h)+'h';
+  return Math.floor(h/24)+'d '+Math.round(h%24)+'h';
+}
+function aqiColor(v) {
+  if (v <= 50)  return '#00e400'; if (v <= 100) return '#ffff00';
+  if (v <= 150) return '#ff7e00'; if (v <= 200) return '#ff0000';
+  if (v <= 300) return '#8f3f97'; return '#7e0023';
+}
+function aqiCat(v) {
+  if (v <= 50)  return 'Good'; if (v <= 100) return 'Moderate';
+  if (v <= 150) return 'Unhealthy for Sensitive'; if (v <= 200) return 'Unhealthy';
+  if (v <= 300) return 'Very Unhealthy'; return 'Hazardous';
+}
+
+function initMap() {
+  map = L.map('map', { zoomControl:false, attributionControl:false }).setView([38,-96], 4);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+    { subdomains:'abcd', maxZoom:18 }).addTo(map);
+  L.control.zoom({ position:'bottomright' }).addTo(map);
+  ['fires','perims','wind','smoke','aqi','struct','fn'].forEach(k => {
+    layers[k] = L.layerGroup().addTo(map);
+  });
+}
+
+async function fetchFIRMS() {
+  setStep('Fetching NASA FIRMS VIIRS/SNPP active fire data…');
+  try {
+    const url = `https://firms.modaps.eosdis.nasa.gov/api/area/csv/${FIRMS_KEY}/VIIRS_SNPP_NRT/-180,20,-50,75/3`;
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('HTTP '+r.status);
+    const txt = await r.text();
+    const parsed = parseFIRMS(txt);
+    if (parsed && parsed.length > 3) {
+      setBadge('badge-firms', true);
+      return parsed;
+    }
+  } catch(e) { console.warn('FIRMS fail:', e); }
+  setBadge('badge-firms', false);
+  return null;
+}
+
+function parseFIRMS(csv) {
+  const lines = csv.trim().split('\n');
+  if (lines.length < 2) return null;
+  const h = lines[0].split(',');
+  const [li,loi,fi,di,ti] = ['latitude','longitude','frp','acq_date','type'].map(k=>h.indexOf(k));
+  if (li<0||loi<0) return null;
+  const pts = [];
+  for (let i=1;i<Math.min(lines.length,500);i++) {
+    const p = lines[i].split(',');
+    const lat=parseFloat(p[li]), lon=parseFloat(p[loi]), frp=fi>=0?parseFloat(p[fi])||0:50;
+    if (isNaN(lat)||isNaN(lon)||lon<-180||lon>-50||lat<15||lat>75) continue;
+    pts.push({ lat,lon,frp, date:di>=0?p[di]:'', id:'f'+i });
+  }
+  return pts.length>0 ? pts : null;
+}
+
+function clusterFIRMS(raw) {
+  const used=new Set(), clusters=[];
+  const R=0.7;
+  for (let i=0;i<raw.length;i++) {
+    if (used.has(i)) continue;
+    const g=[raw[i]];
+    for (let j=i+1;j<raw.length;j++) {
+      if (used.has(j)) continue;
+      const d=Math.hypot(raw[i].lat-raw[j].lat, raw[i].lon-raw[j].lon);
+      if (d<R) { g.push(raw[j]); used.add(j); }
+    }
+    used.add(i);
+    const frp=g.reduce((s,f)=>s+f.frp,0);
+    const lat=g.reduce((s,f)=>s+f.lat,0)/g.length;
+    const lon=g.reduce((s,f)=>s+f.lon,0)/g.length;
+    clusters.push({
+      lat,lon,frp,count:g.length,date:g[0].date,
+      type:'wildfire',id:'c'+i,
+      hoursSince:Math.random()*96+1,
+      name:guessName(lat,lon)
+    });
+  }
+  return clusters.sort((a,b)=>b.frp-a.frp).slice(0,80);
+}
+
+function guessName(lat,lon) {
+  const reg=[
+    [47,-121,'Cascades'],[46,-114,'Bitterroot'],[39,-120,'Sierra'],[37,-119,'Yosemite'],
+    [34,-117,'Angeles'],[36,-118,'Sequoia'],[46,-110,'Absaroka'],[44,-110,'Teton'],
+    [40,-105,'Rockies'],[35,-111,'Mogollon'],[38,-107,'Mesa Verde'],[35,-120,'Carrizo'],
+    [40,-123,'Klamath'],[45,-123,'Coast Range'],[33,-117,'San Diego'],[38,-122,'Napa'],
+    [34,-118,'LA County'],[32,-106,'Franklin'],[37,-113,'Dixie'],[48,-120,'North Cascades'],
+  ];
+  const sfx=['Fire','Complex','Fire Complex','Incident'];
+  let best='Western',bd=9999;
+  for (const [rl,rlm,n] of reg) { const d=Math.hypot(lat-rl,lon-rlm); if(d<bd){bd=d;best=n;} }
+  return best+' '+sfx[Math.abs(Math.round(lon*lat))%sfx.length];
+}
+
+function simFires() {
+  return [
+    [34.1,-118.3,2800,'wildfire','Angeles National Fire'],
+    [38.8,-122.7,1900,'wildfire','Lake County Complex'],
+    [46.9,-121.7,1200,'wildfire','Cascades Fire'],
+    [39.5,-120.3,850,'wildfire','Sierra Nevada Fire'],
+    [33.8,-116.5,650,'wildfire','Palm Springs Fire'],
+    [44.5,-110.8,480,'wildfire','Yellowstone Complex'],
+    [35.2,-111.6,390,'wildfire','Flagstaff Fire'],
+    [47.5,-113.9,310,'wildfire','Glacier Fire'],
+    [37.8,-119.5,280,'wildfire','Yosemite Burn'],
+    [37.3,-121.9,520,'wildfire','Diablo Range Fire'],
+    [40.4,-105.0,430,'wildfire','Front Range Fire'],
+    [36.1,-115.2,200,'wildfire','Spring Mountains Fire'],
+    [35.6,-120.7,690,'wildfire','San Luis Obispo Fire'],
+    [48.4,-120.2,780,'wildfire','North Cascades Complex'],
+    [31.8,-106.4,320,'wildfire','Trans-Pecos Fire'],
+    [32.7,-117.1,140,'structural','San Diego Structural'],
+    [40.7,-74.0,85,'structural','NYC Industrial'],
+    [29.7,-95.4,95,'structural','Houston Warehouse'],
+    [33.4,-112.0,170,'structural','Phoenix Industrial'],
+    [47.6,-122.3,60,'structural','Seattle Structural'],
+  ].map((c,i)=>({
+    lat:c[0]+(Math.random()-.5)*.25,lon:c[1]+(Math.random()-.5)*.25,
+    frp:c[2]+Math.random()*c[2]*.1,type:c[3],name:c[4],id:'sim'+i,
+    count:Math.ceil(c[2]/80),hoursSince:Math.random()*72+1,
+    date:new Date(Date.now()-Math.random()*172800000).toISOString().slice(0,10)
+  }));
+}
+
+async function fetchNIFCPerimeters() {
+  setStep('Fetching NIFC fire perimeters…');
+  try {
+    const url='https://services3.arcgis.com/T4QMspbfLg3qTGWY/arcgis/rest/services/WFIGS_Interagency_Perimeters_Current/FeatureServer/0/query?where=1%3D1&outFields=IncidentName,GISAcres,PercentContained&f=geojson&resultRecordCount=50';
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('NIFC '+r.status);
+    const geo = await r.json();
+    if (geo.features && geo.features.length > 0) {
+      setBadge('badge-nifc', true);
+      return geo;
+    }
+  } catch(e) { console.warn('NIFC fail:', e); }
+  setBadge('badge-nifc', false);
+  return null;
+}
+
+async function fetchNWSWind(lat, lon) {
+  setStep('Fetching NWS surface wind data…');
+  try {
+    const pt = await fetch(`https://api.weather.gov/points/${lat.toFixed(4)},${lon.toFixed(4)}`);
+    if (!pt.ok) throw new Error('pts '+pt.status);
+    const ptd = await pt.json();
+    const fc = await fetch(ptd.properties.forecastHourly);
+    if (!fc.ok) throw new Error('fc '+fc.status);
+    const fcd = await fc.json();
+    const p = fcd.properties.periods[0];
+    const spd = parseFloat(p.windSpeed)||10;
+    const dir = windStrToDegs(p.windDirection);
+    setBadge('badge-nws', true);
+    return { speed:spd, dir, gust:parseFloat(p.windGust)||0, source:'NWS Hourly', label:p.windSpeed+' '+p.windDirection };
+  } catch(e) {
+    setBadge('badge-nws', false);
+    return { speed:12+Math.random()*8, dir:200+Math.random()*60, gust:0, source:'Model estimate', label:'Estimated' };
+  }
+}
+
+function windStrToDegs(s) {
+  return {N:360,NNE:22,NE:45,ENE:67,E:90,ESE:112,SE:135,SSE:157,
+    S:180,SSW:202,SW:225,WSW:247,W:270,WNW:292,NW:315,NNW:337}[s]||225;
+}
+
+async function fetchAQI() {
+  if (!apiKeys.airnow) {
+    setBadge('badge-aqi', false);
+    renderSimAQI();
+    return;
+  }
+  setStep('Fetching AirNow AQI data…');
+  try {
+    const url=`https://www.airnowapi.org/aq/observation/latLong/current/?format=application/json&latitude=37&longitude=-119&distance=300&API_KEY=${apiKeys.airnow}`;
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('AQI '+r.status);
+    const data = await r.json();
+    if (data && data.length > 0) {
+      setBadge('badge-aqi', true);
+      processAQIData(data);
+      return;
+    }
+  } catch(e) { console.warn('AQI fail:', e); }
+  setBadge('badge-aqi', false);
+  renderSimAQI();
+}
+
+function processAQIData(data) {
+  aqiStations = data.map(s=>({
+    lat: s.Latitude, lon: s.Longitude,
+    aqi: s.AQI, cat: s.Category.Name,
+    param: s.ParameterName, date: s.DateObserved
+  }));
+  renderAQILayer();
+  const maxAqi = Math.max(...aqiStations.map(s=>s.aqi));
+  updateAQIBadge(maxAqi);
+}
+
+function renderSimAQI() {
+  aqiStations = [
+    {lat:34.05,lon:-118.25,aqi:168,cat:'Unhealthy',param:'PM2.5'},
+    {lat:37.77,lon:-122.42,aqi:52,cat:'Moderate',param:'PM2.5'},
+    {lat:39.52,lon:-119.81,aqi:88,cat:'Moderate',param:'PM2.5'},
+    {lat:47.61,lon:-122.33,aqi:32,cat:'Good',param:'PM2.5'},
+    {lat:33.45,lon:-112.07,aqi:112,cat:'Unhealthy for Sensitive',param:'PM2.5'},
+    {lat:29.76,lon:-95.37,aqi:78,cat:'Moderate',param:'PM2.5'},
+    {lat:40.71,lon:-74.01,aqi:45,cat:'Good',param:'PM2.5'},
+    {lat:35.22,lon:-111.65,aqi:195,cat:'Unhealthy',param:'PM2.5'},
+    {lat:46.86,lon:-121.73,aqi:210,cat:'Very Unhealthy',param:'PM2.5'},
+    {lat:38.83,lon:-122.72,aqi:230,cat:'Very Unhealthy',param:'PM2.5'},
+  ];
+  renderAQILayer();
+  const maxAqi = Math.max(...aqiStations.map(s=>s.aqi));
+  updateAQIBadge(maxAqi);
+}
+
+function renderAQILayer() {
+  layers.aqi.clearLayers();
+  if (!$('tog-aqi').checked) return;
+  aqiStations.forEach(s=>{
+    const c = aqiColor(s.aqi);
+    const m = L.circleMarker([s.lat,s.lon],{
+      radius:8, color:'#0a0a0f', fillColor:c, fillOpacity:0.85, weight:1.5
+    }).bindTooltip(`AQI: ${Math.round(s.aqi)}<br>${s.cat}<br>${s.param}`,{sticky:true});
+    layers.aqi.addLayer(m);
+  });
+}
+
+function updateAQIBadge(v) {
+  $('aqi-val').textContent = Math.round(v);
+  $('aqi-val').style.color = aqiColor(v);
+  $('aqi-cat').textContent = aqiCat(v);
+  const pct = Math.min(100, (v/300)*100);
+  $('aqi-marker').style.left = pct+'%';
+}
+
+// ── FireNotification Webhook Integration ─────────────────────────────────────
+// FN uses HTTPS POST webhooks (not REST polling). This function geocodes the
+// address from the payload and maps it. In production, your server receives
+// POST /fn-webhook, verifies X-FN-Signature (HMAC-SHA256), and forwards here.
+
+function parseFNPayload(envelope) {
+  // Accepts the full FN webhook envelope object per spec v1.02
+  const d = envelope.data || {};
+  const addr = d.address || {};
+  const titles = (d.titles || [])[0] || {};
+  const pd = titles.propertyDetails || {};
+  const oi = titles.ownerInfo || {};
+  const av = titles.assessedValues || {};
+  const ls = titles.lastSale || {};
+  const li = titles.loanInfo || {};
+
+  // Parse incidentType: "HOUSE | FIRE" → { structure, callType }
+  const typeParts = (d.incidentType || '').split('|').map(s => s.trim());
+  const structure = typeParts[0] || 'UNKNOWN';
+  const callType  = typeParts[1] || 'FIRE';
+
+  return {
+    id:          'fn_' + (d.incidentId || envelope.id || Math.random()),
+    incidentId:  d.incidentId,
+    eventType:   envelope.eventType,
+    status:      d.status || 'active',
+    alarm:       d.alarm || 1,
+    paged:       d.paged || false,
+    structure, callType,
+    type:        d.incidentType || 'STRUCTURE | FIRE',
+    name:        `${structure} ${callType} — ${addr.city || ''}`,
+    addressLine: addr.line1 || '',
+    address:     addr.line1 || '',
+    city:        addr.city  || '',
+    county:      addr.county|| '',
+    state:       addr.state || '',
+    zip:         addr.zipCode || '',
+    contact:     d.contact  || null,
+    comments:    (d.comments || []).sort((a,b) => new Date(b.createdAt)-new Date(a.createdAt)),
+    notes:       d.notes    || [],
+    createdAt:   d.createdAt|| envelope.occurredAt,
+    updatedAt:   d.updatedAt|| envelope.occurredAt,
+    closedAt:    d.closedAt || null,
+    // Property intelligence
+    yearBuilt:   pd.yearBuilt   || null,
+    sqft:        pd.livingArea  || null,
+    bedrooms:    pd.bedrooms    || null,
+    bathrooms:   pd.bathrooms   || null,
+    propType:    pd.propertyType|| null,
+    ownerName:   oi.name        || null,
+    ownerOccupied: oi.ownerOccupied,
+    assessedTotal:  av.total      || null,
+    marketValue:    av.marketValue|| null,
+    assessedYear:   av.year       || null,
+    lastSaleDate:   ls.date       || null,
+    lastSalePrice:  ls.price      || null,
+    loanAmount:     li.loanAmount || null,
+    lender:         li.lender     || null,
+    frp: 80 + (d.alarm || 1) * 20,
+    hasTitleData: !!titles.propertyDetails,
+  };
+}
+
+// Geocode address using Nominatim (free, no key required)
+async function geocodeFNAddress(inc) {
+  try {
+    const q = encodeURIComponent(`${inc.addressLine}, ${inc.city}, ${inc.state} ${inc.zip}, USA`);
+    const r = await fetch(`https://nominatim.openstreetmap.org/search?q=${q}&format=json&limit=1`,
+      { headers: { 'Accept-Language': 'en', 'User-Agent': 'FireWatchUSA/1.0' } });
+    const data = await r.json();
+    if (data && data[0]) {
+      inc.lat = parseFloat(data[0].lat);
+      inc.lon = parseFloat(data[0].lon);
+    }
+  } catch(e) { /* use fallback coords if geocode fails */ }
+  return inc;
+}
+
+async function fetchFNIncidents() {
+try { const r = await fetch('http://localhost:3001/fn-incidents'); const data = await r.json(); if(data.incidents&&data.incidents.length>0){const parsed=data.incidents.map(i=>parseFNPayload({id:i._lastEventId,eventType:i._lastEventType,occurredAt:i._lastEventAt,data:i})); Promise.all(parsed.map(p=>geocodeFNAddress(p))).then(geo=>{fnIncidents=[...geo.filter(g=>g.lat),...fnIncidents];renderFNLayer();renderFireList();});} } catch(e) { console.warn('FN server',e); }
+  // FN is webhook-based (push), not poll-based.
+  // Simulate the three real sample payloads from the spec for demo purposes.
+  // In production: POST arrives at your server → verify HMAC-SHA256 signature
+  // → call ingestFNPayload(envelope) → map updates in real time.
+  setStep('Loading FireNotification webhook simulation…');
+
+  const samplePayloads = [
+    // Sample 1: Incident Created (Oxnard CA) — spec §9.1
+    { id:'evt_7947afe0ac4e4533b7782dbb242836d7', eventType:'webhook:incident.created',
+      occurredAt:'2026-03-04T01:03:56.252Z', webhookId:'403ce733-be92-4891-abc2-405f57544ca6',
+      businessId:'bZS57xTirfD04lBJr1CkYNUc',
+      data:{ incidentId:'26-080803', incidentType:'HOUSE | FIRE', alarm:1, status:'active',
+        paged:false, address:{ line1:'123 Main St', line2:null, city:'Oxnard',
+          county:'VENTURA COUNTY', state:'CA', zipCode:'93030' },
+        createdAt:'2026-03-04T01:03:56.000Z', updatedAt:'2026-03-04T01:03:56.000Z', closedAt:null }},
+    // Sample 2: Incident Closed with comments (North Haven CT) — spec §9.2
+    { id:'evt_70856ef1104040018850c230da5a97e4', eventType:'webhook:incident.closed',
+      occurredAt:'2026-03-04T01:04:18.706Z', webhookId:'403ce733-be92-4891-abc2-405f57544ca6',
+      businessId:'bZS57xTirfD04lBJr1CkYNUc',
+      data:{ incidentId:'26-080799', incidentType:'HOUSE | INVESTIGATION', alarm:1,
+        status:'closed', paged:false,
+        address:{ line1:'456 Oak Ave', city:'North Haven', county:'SOUTH CENTRAL CONNECTICUT',
+          state:'CT', zipCode:'06473' },
+        createdAt:'2026-03-04T01:02:23.000Z', updatedAt:'2026-03-04T01:04:18.000Z',
+        closedAt:'2026-03-04T01:04:18.000Z',
+        comments:[
+          { id:'Aeyo6rXz', content:'NOTHING SHOWING / NO REPORTED SMOKE + FIRE / NO HAZARD AT LOCATION / ENGINE HANDLE AS INVESTIGATION', createdAt:'2026-03-04T01:04:15.000Z' },
+          { id:'biphaLbq', content:'REPORTED SMELL OF SMOKE + ODOR OF SMOKE IN THE BASEMENT', createdAt:'2026-03-04T01:02:35.000Z' },
+          { id:'XCOqYR9h', content:'1 STORY HOUSE', createdAt:'2026-03-04T01:02:38.000Z' },
+        ]}},
+    // Sample 3: Paged with full title/contact/comments (Sharpsburg GA) — spec §9.3
+    { id:'evt_5f549e4106ea4995809b4665effb39ed', eventType:'webhook:incident.comment.paged',
+      occurredAt:'2026-03-04T01:04:44.199Z', webhookId:'403ce733-be92-4891-abc2-405f57544ca6',
+      businessId:'bZS57xTirfD04lBJr1CkYNUc',
+      data:{ incidentId:'26-080752', incidentType:'HOUSE | FIRE', alarm:1, status:'active',
+        paged:true, address:{ line1:'789 Elm Dr', city:'Sharpsburg', county:'COWETA COUNTY',
+          state:'GA', zipCode:'30277' },
+        contact:'JOHN + JANE DOE 555-123-4567 555-987-6543',
+        createdAt:'2026-03-04T00:16:29.000Z', updatedAt:'2026-03-04T01:04:44.000Z', closedAt:null,
+        comments:[
+          { id:'2hyGNFGF', content:'FIRE IN THE ATTIC / ATTIC LADDER REQ', createdAt:'2026-03-04T01:04:28.000Z' },
+          { id:'2pvpuXEa', content:'REPORT OF 1 DOG INSIDE THE HOUSE / WORKING FIRE / FIRE ATTACK', createdAt:'2026-03-04T00:25:10.000Z' },
+          { id:'ylXRS6y6', content:'FIRE UNDER CONTROL / LIGHT HAZE IN THE BASEMENT / SMOKE REMOVAL STARTED', createdAt:'2026-03-04T00:33:23.000Z' },
+          { id:'ik6Gd45w', content:'LIGHT SMOK SHOWING FROM THE EAVES', createdAt:'2026-03-04T00:23:33.000Z' },
+          { id:'R1CgqGli', content:'PPV FAN STARTED FOR SMOKE REMOVAL', createdAt:'2026-03-04T00:34:06.000Z' },
+        ],
+        titles:[{ propertyDetails:{ address:'789 ELM DR', city:'SHARPSBURG', state:'GA',
+            zip:'30277', yearBuilt:'2017', livingArea:3699, bedrooms:'4.0', bathrooms:'4.0',
+            propertyType:'1 FAMILY (DETACHED)' },
+          ownerInfo:{ name:'DOE, JOHN A', ownerOccupied:true },
+          assessedValues:{ total:'325264.00', land:'31864.00', improvements:'293400.00',
+            marketValue:'813159.00', year:'2025' },
+          lastSale:{ date:'2016-04-05T00:00:00.000Z', price:'125000.00',
+            buyer:'ACME HOMES LLC', seller:'SMITH, ROBERT J' },
+          loanInfo:{ lender:'FIRST NATIONAL MORTGAGE CO',
+            loanDate:'2020-07-14T00:00:00.000Z', loanAmount:'455920.00' }
+        }]
+      }},
+  ];
+
+  // Parse all sample payloads using the spec-compliant parser
+  const parsed = samplePayloads.map(parseFNPayload);
+
+  // Add approx coords for simulation (real system geocodes via Nominatim or stored address DB)
+  const coords = [
+    [34.197, -119.177], // Oxnard CA
+    [41.390, -72.858],  // North Haven CT
+    [33.352, -84.659],  // Sharpsburg GA
+  ];
+  fnIncidents = parsed.map((inc, i) => ({ ...inc, lat: coords[i][0], lon: coords[i][1] }));
+
+  setBadge('badge-fn', true);
+  renderFNLayer();
+}
+
+// Entry point for live webhook payloads arriving from your server proxy
+function ingestFNPayload(envelope) {
+  const inc = parseFNPayload(envelope);
+  geocodeFNAddress(inc).then(geocoded => {
+    if (!geocoded.lat) return; // skip if geocode failed
+    const existing = fnIncidents.findIndex(f => f.incidentId === geocoded.incidentId);
+    if (existing >= 0) fnIncidents[existing] = geocoded;
+    else fnIncidents.unshift(geocoded);
+    renderFNLayer();
+    renderFireList();
+    pushAlert('fn_'+geocoded.incidentId,
+      `${geocoded.callType} — ${geocoded.addressLine}, ${geocoded.city} ${geocoded.state}`,
+      'struct');
+  });
+}
+
+function renderFNLayer() {
+  layers.fn.clearLayers();
+  if (!$('tog-fn').checked || !$('tog-fntype').checked) return;
+  fnIncidents.forEach(inc=>{
+    const m = L.circleMarker([inc.lat,inc.lon],{
+      radius:7, color:'#7c3aed', fillColor:'#a855f7', fillOpacity:0.9, weight:2
+    });
+    const age = Math.round((Date.now()-new Date(inc.time).getTime())/60000);
+    m.bindTooltip(`<strong>${inc.type}</strong><br>${inc.address}<br>${inc.city}, ${inc.state}<br>${age < 60 ? age+'m ago' : Math.round(age/60)+'h ago'}`,{sticky:true});
+    m.on('click',()=>showFNDrawer(inc));
+    layers.fn.addLayer(m);
+  });
+  pushAlert('fn', fnIncidents.length+' FN structural incidents loaded', 'struct');
+}
+
+function showFNDrawer(inc) {
+  const age = Math.round((Date.now()-new Date(inc.createdAt||Date.now()).getTime())/60000);
+  const ageStr = age < 60 ? age+'m ago' : Math.round(age/60)+'h ago';
+  const statusColor = inc.status==='active' ? '#FF1744' : inc.status==='closed' ? '#44445a' : '#FFB800';
+  const alarmColor = inc.alarm > 1 ? '#FF1744' : '#FFB800';
+
+  const commentsHtml = inc.comments.length > 0
+    ? inc.comments.map(c => {
+        const t = new Date(c.createdAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+        return `<div style="padding:5px 0;border-bottom:1px solid var(--border);font-size:10px">
+          <div style="color:var(--faint);font-size:9px;margin-bottom:2px">${t}</div>
+          <div style="color:var(--text)">${c.content}</div>
+        </div>`;
+      }).join('')
+    : '<div style="font-size:10px;color:var(--faint)">No dispatch comments</div>';
+
+  const titleHtml = inc.hasTitleData ? `
+    <div class="tsect">
+      <div class="tlabel">Property intelligence</div>
+      <div class="stat-grid">
+        <div class="stat"><div class="stat-l">Year built</div><div class="stat-v" style="color:var(--text);font-size:13px">${inc.yearBuilt||'—'}</div></div>
+        <div class="stat"><div class="stat-l">Sq ft</div><div class="stat-v" style="color:var(--text);font-size:13px">${inc.sqft?inc.sqft.toLocaleString():'—'}</div></div>
+        <div class="stat"><div class="stat-l">Beds / Baths</div><div class="stat-v" style="color:var(--text);font-size:13px">${inc.bedrooms||'—'} / ${inc.bathrooms||'—'}</div></div>
+        <div class="stat"><div class="stat-l">Type</div><div class="stat-v" style="color:var(--muted);font-size:10px;margin-top:4px">${inc.propType||'—'}</div></div>
+      </div>
+      <div style="background:#141420;border-radius:6px;padding:8px 10px;margin:6px 0">
+        <div class="stat-l" style="margin-bottom:4px">Owner</div>
+        <div style="font-size:12px;color:var(--text);font-weight:600">${inc.ownerName||'—'}</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px">${inc.ownerOccupied ? 'Owner-occupied' : 'Non-owner occupied'}</div>
+      </div>
+      ${inc.contact ? `<div style="background:#0f1a0f;border-radius:6px;padding:8px 10px;margin:6px 0;border:1px solid #2a4a2a">
+        <div class="stat-l" style="margin-bottom:3px">Contact on file</div>
+        <div style="font-size:11px;color:#6ada6a">${inc.contact}</div>
+      </div>` : ''}
+      <div style="background:#141420;border-radius:6px;padding:8px 10px;margin:6px 0">
+        <div class="stat-l" style="margin-bottom:4px">Assessed value (${inc.assessedYear||'—'})</div>
+        <div style="font-size:14px;font-weight:700;color:var(--amber)">$${inc.marketValue?parseFloat(inc.marketValue).toLocaleString():'—'}</div>
+        <div style="font-size:10px;color:var(--faint);margin-top:2px">Assessed total: $${inc.assessedTotal?parseFloat(inc.assessedTotal).toLocaleString():'—'}</div>
+      </div>
+      ${inc.lastSalePrice ? `<div style="font-size:10px;color:var(--muted);padding:4px 0;border-bottom:1px solid var(--border)">
+        Last sale: <span style="color:var(--text)">$${parseFloat(inc.lastSalePrice).toLocaleString()}</span>
+        <span style="color:var(--faint)"> · ${inc.lastSaleDate?new Date(inc.lastSaleDate).getFullYear():'—'}</span>
+      </div>` : ''}
+      ${inc.loanAmount ? `<div style="font-size:10px;color:var(--muted);padding:4px 0">
+        Loan: <span style="color:var(--text)">$${parseFloat(inc.loanAmount).toLocaleString()}</span>
+        <span style="color:var(--faint)"> · ${inc.lender||''}</span>
+      </div>` : ''}
+    </div>` : `<div class="tsect"><div class="tlabel">Property intelligence</div>
+      <div style="font-size:10px;color:var(--faint)">Title data not yet available for this incident.</div></div>`;
+
+  $('drawer-content').innerHTML = `
+    <div class="dtitle" style="color:#a855f7">${inc.callType} — ${inc.structure}</div>
+    <div style="display:flex;gap:6px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+      <span style="font-size:9px;padding:2px 6px;border-radius:3px;background:${statusColor}22;color:${statusColor};border:1px solid ${statusColor}44">${(inc.status||'active').toUpperCase()}</span>
+      ${inc.paged ? '<span style="font-size:9px;padding:2px 6px;border-radius:3px;background:#a855f722;color:#a855f7;border:1px solid #a855f744">PAGED</span>' : ''}
+      <span style="font-size:9px;padding:2px 6px;border-radius:3px;background:${alarmColor}22;color:${alarmColor};border:1px solid ${alarmColor}44">ALARM ${inc.alarm}</span>
+      <span style="font-size:9px;color:var(--faint)">${ageStr}</span>
+    </div>
+    <div style="background:#141420;border-radius:6px;padding:8px 10px;margin-bottom:8px">
+      <div class="stat-l" style="margin-bottom:3px">Location</div>
+      <div style="font-size:12px;color:var(--text)">${inc.addressLine}</div>
+      <div style="font-size:11px;color:var(--muted)">${inc.city}, ${inc.county} ${inc.state} ${inc.zip}</div>
+      <div style="font-size:9px;color:var(--faint);margin-top:3px">Incident ID: ${inc.incidentId}</div>
+    </div>
+    <div style="background:#141420;border-radius:6px;padding:8px 10px;margin-bottom:8px">
+      <div class="stat-l" style="margin-bottom:3px">Wind / smoke risk</div>
+      <div style="font-size:11px;color:var(--teal)">${Math.round(windData.speed)} mph ${degToCompass(windData.dir)} — smoke drifting ${degToCompass((windData.dir+180)%360)}</div>
+      <div style="font-size:10px;color:var(--faint);margin-top:2px">Est. plume reach: ~${Math.round(5+windData.speed*0.4)} km downwind</div>
+    </div>
+    ${titleHtml}
+    <div class="tsect">
+      <div class="tlabel">Dispatch comments (${inc.comments.length})</div>
+      ${commentsHtml}
+    </div>
+    <div style="margin-top:10px;font-size:9px;color:var(--faint);padding:6px;background:#0a0a14;border-radius:4px">
+      Event: ${inc.eventType||'—'}<br>
+      Source: FireNotification Webhook v1.02
+    </div>`;
+  $('drawer').classList.add('open');
+}
+
+function renderWindLayer() {
+  layers.wind.clearLayers();
+  if (!$('tog-wind').checked) return;
+  const step=4;
+  for (let lat=25;lat<=50;lat+=step) {
+    for (let lon=-125;lon<=-65;lon+=step) {
+      const ld = windData.dir+(Math.random()-.5)*20;
+      const ls = windData.speed+(Math.random()-.5)*3;
+      const rad=(ld-90)*Math.PI/180;
+      const len=0.35+ls*.025;
+      const elat=lat+Math.sin((ld-180)*Math.PI/180)*len*.6;
+      const elon=lon+Math.cos((ld-180)*Math.PI/180)*len;
+      const line=L.polyline([[lat,lon],[elat,elon]],{color:'#00C9A7',weight:1.5,opacity:0.5});
+      layers.wind.addLayer(line);
+    }
+  }
+}
+
+function getSmokeReach(frp, windSpeed, stabClass) {
+  const base = frp>1500?90000:frp>500?55000:frp>100?32000:16000;
+  const stabMult = [1.6,1.3,1.0,0.7,0.5][stabClass-1]||1.0;
+  const wm = parseFloat($('wind-mult').value)/10;
+  return base * stabMult + windSpeed*2000*wm;
+}
+
+function drawSmokeZone(f, wd, ws, stabClass) {
+  const reach=getSmokeReach(f.frp,ws,stabClass);
+  const hw=f.frp>1500?55:f.frp>500?42:f.frp>100?30:20;
+  const latM=1/111320, lonM=1/(111320*Math.cos(f.lat*Math.PI/180));
+  const cRad=(wd-90)*Math.PI/180;
+  const pts=[], steps=28;
+  for (let i=0;i<=steps;i++) {
+    const frac=i/steps;
+    const along=reach*frac;
+    const spread=reach*Math.sin(frac*Math.PI)*hw/180;
+    const dlat=along*latM*Math.sin(cRad-Math.PI/2);
+    const dlon=along*lonM*Math.cos(cRad-Math.PI/2);
+    const plat=spread*latM*Math.cos(cRad-Math.PI/2)*.5;
+    const plon=spread*lonM*Math.sin(cRad-Math.PI/2)*.5;
+    pts.push([f.lat+dlat+plat,f.lon+dlon+plon]);
+  }
+  for (let i=steps;i>=0;i--) {
+    const frac=i/steps;
+    const along=reach*frac;
+    const spread=reach*Math.sin(frac*Math.PI)*hw/180;
+    const dlat=along*latM*Math.sin(cRad-Math.PI/2);
+    const dlon=along*lonM*Math.cos(cRad-Math.PI/2);
+    const plat=spread*latM*Math.cos(cRad-Math.PI/2)*.5;
+    const plon=spread*lonM*Math.sin(cRad-Math.PI/2)*.5;
+    pts.push([f.lat+dlat-plat,f.lon+dlon-plon]);
+  }
+  const alpha=Math.min(0.2,0.05+f.frp/25000);
+  return L.polygon(pts,{color:'#ff4e0d',fillColor:'#ff4e0d',fillOpacity:alpha,weight:.5,opacity:.3});
+}
+
+function structuresAtRisk(f, wd, ws) {
+  const reach=getSmokeReach(f.frp,ws,$('stab-class').value);
+  const latM=1/111320, lonM=1/(111320*Math.cos(f.lat*Math.PI/180));
+  const cRad=(wd-90)*Math.PI/180;
+  const count=Math.min(15,Math.floor(f.frp/100+ws*1.2+Math.random()*8));
+  const structs=[];
+  const types=['Residential','Commercial','Industrial','School','Hospital','Government'];
+  for (let i=0;i<count;i++) {
+    const d=(0.15+Math.random()*.85)*reach;
+    const sp=(Math.random()-.5)*2*40*Math.PI/180;
+    const ang=cRad-Math.PI/2+sp;
+    const slat=f.lat+d*latM*Math.sin(ang);
+    const slon=f.lon+d*lonM*Math.cos(ang);
+    const risk=d<reach*.35?'High':d<reach*.65?'Moderate':'Low';
+    structs.push({lat:slat,lon:slon,risk,
+      type:types[Math.floor(Math.random()*types.length)],
+      dist:Math.round(d/1000),frp:f.frp});
+  }
+  return structs;
+}
+
+function renderAllLayers() {
+  const showFires=$('tog-fires').checked;
+  const showPerim=$('tog-perim').checked;
+  const showWind=$('tog-wind').checked;
+  const showSmoke=$('tog-smoke').checked;
+  const showStruct=$('tog-struct').checked;
+  const showWF=$('tog-wf').checked, showSF=$('tog-sf').checked;
+  const stabClass=parseInt($('stab-class').value)||3;
+
+  layers.fires.clearLayers();
+  layers.smoke.clearLayers();
+  layers.struct.clearLayers();
+
+  renderWindLayer();
+  renderAQILayer();
+  renderFNLayer();
+
+  fires.forEach(f=>{
+    if (f.type==='wildfire'&&!showWF) return;
+    if (f.type==='structural'&&!showSF) return;
+    const ld=windData.dir+(Math.random()-.5)*18;
+    const ls=windData.speed+(Math.random()-.5)*3;
+
+    if (showSmoke) {
+      const z=drawSmokeZone(f,ld,ls,stabClass);
+      z.on('click',()=>selectFire(f));
+      layers.smoke.addLayer(z);
+    }
+    if (showStruct) {
+      const structs=structuresAtRisk(f,ld,ls);
+      structs.forEach(s=>{
+        const rc=s.risk==='High'?'#FF1744':s.risk==='Moderate'?'#FF6B00':'#FFB800';
+        const m=L.circleMarker([s.lat,s.lon],{
+          radius:3.5,color:rc,fillColor:rc,fillOpacity:.75,weight:1
+        }).bindTooltip(`${s.type}<br>${s.risk} risk — ${s.dist}km downwind`,{sticky:true});
+        layers.struct.addLayer(m);
+      });
+    }
+    if (showFires) {
+      const c=frpColor(f.frp), r=frpRadius(f.frp);
+      const outer=L.circleMarker([f.lat,f.lon],{radius:r+4,color:c,fillColor:c,fillOpacity:.12,weight:0});
+      const inner=L.circleMarker([f.lat,f.lon],{radius:r,color:'#0a0a0f',fillColor:c,fillOpacity:.9,weight:1.5});
+      inner.bindTooltip(`<strong>${f.name}</strong><br>${Math.round(f.frp)} MW · ${f.type}`,{sticky:true});
+      inner.on('click',()=>selectFire(f));
+      outer.on('click',()=>selectFire(f));
+      layers.fires.addLayer(outer);
+      layers.fires.addLayer(inner);
+    }
+  });
+}
+
+function renderNIFCLayer(geo) {
+  layers.perims.clearLayers();
+  if (!geo||!$('tog-perim').checked) return;
+  const perimLayer=L.geoJSON(geo,{
+    style:()=>({color:'#FF6B00',fillColor:'#FF4E0D',fillOpacity:.06,weight:1.5,dashArray:'4 3'}),
+    onEachFeature:(feat,layer)=>{
+      const p=feat.properties||{};
+      layer.bindTooltip(`${p.IncidentName||'Fire'}<br>${Math.round(p.GISAcres||0).toLocaleString()} acres<br>${Math.round(p.PercentContained||0)}% contained`,{sticky:true});
+    }
+  });
+  layers.perims.addLayer(perimLayer);
+  setBadge('badge-nifc',true);
+}
+
+function renderFireList() {
+  const list=$('fire-list');
+  list.innerHTML='';
+  let items=[];
+  if (currentTab==='fires') items=fires.filter(f=>f.type==='wildfire');
+  else if (currentTab==='struct') items=fires.filter(f=>f.type==='structural');
+  else if (currentTab==='fn') items=fnIncidents;
+  $('fw-count').textContent=items.length;
+  const maxFRP=items.reduce((m,f)=>Math.max(m,f.frp||80),1);
+  items.slice(0,50).forEach(f=>{
+    const el=document.createElement('div');
+    el.className='fitem'+(selectedFire&&selectedFire.id===f.id?' active':'');
+    el.id='fi-'+f.id;
+    const c=currentTab==='fn'?'#a855f7':frpColor(f.frp);
+    const pct=Math.round((f.frp/maxFRP)*100);
+    const label=currentTab==='fn'?f.type:f.type;
+    el.innerHTML=`<div class="fname">${f.name||f.type}</div>
+      <div class="fmeta">${label} · ${Math.round(f.frp)} MW${f.hoursSince?` · ${formatDur(f.hoursSince)}`:''}</div>
+      <div class="fbar"><div class="fbfill" style="width:${pct}%;background:${c}"></div></div>`;
+    el.addEventListener('click',()=>(currentTab==='fn'||f.incidentId)?showFNDrawer(f):selectFire(f));
+    list.appendChild(el);
+  });
+}
+
+function switchTab(tab) {
+  currentTab=tab;
+  document.querySelectorAll('.stab').forEach((el,i)=>{
+    el.classList.toggle('active',['fires','struct','fn'][i]===tab);
+  });
+  renderFireList();
+}
+
+function selectFire(f) {
+  selectedFire=f;
+  document.querySelectorAll('.fitem').forEach(el=>el.classList.remove('active'));
+  const el=$('fi-'+f.id);
+  if (el) el.classList.add('active');
+  map.flyTo([f.lat,f.lon],9,{duration:1.1});
+  showFireDrawer(f);
+}
+
+function showFireDrawer(f) {
+  const stabClass=parseInt($('stab-class').value)||3;
+  const reach=getSmokeReach(f.frp,windData.speed,stabClass);
+  const structs=structuresAtRisk(f,windData.dir,windData.speed);
+  const hi=structs.filter(s=>s.risk==='High').length;
+  const mo=structs.filter(s=>s.risk==='Moderate').length;
+  const lo=structs.filter(s=>s.risk==='Low').length;
+  $('drawer-content').innerHTML=`
+    <div class="dtitle">${f.name}</div>
+    <div style="font-size:10px;color:var(--faint);margin-bottom:10px">${f.type.toUpperCase()} · ${f.date||'Active'}</div>
+    <div class="stat-grid">
+      <div class="stat"><div class="stat-l">FRP</div><div class="stat-v" style="color:${frpColor(f.frp)}">${Math.round(f.frp)}<span style="font-size:10px;color:var(--faint)">MW</span></div></div>
+      <div class="stat"><div class="stat-l">Duration</div><div class="stat-v" style="color:var(--amber);font-size:13px">${f.hoursSince?formatDur(f.hoursSince):'Active'}</div></div>
+      <div class="stat"><div class="stat-l">Detections</div><div class="stat-v" style="color:var(--muted);font-size:13px">${f.count||1}</div></div>
+      <div class="stat"><div class="stat-l">Smoke reach</div><div class="stat-v" style="color:var(--ember);font-size:12px">${Math.round(reach/1000)}<span style="font-size:10px;color:var(--faint)">km</span></div></div>
+    </div>
+    <div style="background:#141420;border-radius:6px;padding:8px 10px;margin:8px 0">
+      <div class="stat-l" style="margin-bottom:3px">Wind at fire site</div>
+      <div style="font-size:13px;font-weight:700;color:var(--teal)">${Math.round(windData.speed)} mph ${degToCompass(windData.dir)}</div>
+      <div style="font-size:10px;color:var(--faint);margin-top:2px">Smoke drifting ${degToCompass((windData.dir+180)%360)} · Stability: ${stabilityLabels[stabClass-1]}</div>
+      <div style="font-size:10px;color:var(--faint)">${windData.source}</div>
+    </div>
+    <div class="tsect">
+      <div class="tlabel">Structures in smoke/ash path</div>
+      <div class="titem"><div class="tdot" style="background:#FF1744"></div><strong style="color:var(--text)">${hi}</strong>&nbsp;High risk — direct path</div>
+      <div class="titem"><div class="tdot" style="background:#FF6B00"></div><strong style="color:var(--text)">${mo}</strong>&nbsp;Moderate risk</div>
+      <div class="titem"><div class="tdot" style="background:#FFB800"></div><strong style="color:var(--text)">${lo}</strong>&nbsp;Low risk — peripheral</div>
+    </div>
+    ${structs.slice(0,5).map(s=>`
+    <div class="titem">
+      <div class="fn-struct-icon" style="background:${s.risk==='High'?'#FF1744':s.risk==='Moderate'?'#FF6B00':'#FFB800'}"></div>
+      ${s.type} — ${s.risk} — ${s.dist}km
+    </div>`).join('')}
+    <div style="margin-top:12px;padding:7px;background:#0a0a14;border-radius:4px;font-size:10px;color:var(--faint)">
+      ${f.lat.toFixed(4)}°N, ${Math.abs(f.lon).toFixed(4)}°W<br>
+      Source: NASA FIRMS VIIRS/SNPP NRT
+    </div>`;
+  $('drawer').classList.add('open');
+}
+
+function closeDrawer() {
+  $('drawer').classList.remove('open');
+  selectedFire=null;
+  document.querySelectorAll('.fitem').forEach(el=>el.classList.remove('active'));
+}
+
+let alertTimeouts={};
+function pushAlert(id, msg, type='fire') {
+  const feed=$('alert-feed');
+  const existing=document.getElementById('alert-'+id);
+  if (existing) existing.remove();
+  if (++alertCount>5) {
+    const first=feed.firstChild;
+    if (first) first.remove();
+  }
+  const div=document.createElement('div');
+  div.className='alert-item'+(type==='aqi'?' aqi':type==='struct'?' struct':'');
+  div.id='alert-'+id;
+  div.innerHTML=`<div class="alert-title">${type==='fire'?'Fire Alert':type==='aqi'?'Air Quality Alert':'Structural Alert'}</div><div class="alert-body">${msg}</div>`;
+  div.addEventListener('click',()=>div.remove());
+  feed.appendChild(div);
+  clearTimeout(alertTimeouts[id]);
+  alertTimeouts[id]=setTimeout(()=>div.remove(),8000);
+}
+
+function setupToggles() {
+  ['tog-fires','tog-perim','tog-wind','tog-smoke','tog-aqi','tog-struct','tog-fn','tog-wf','tog-sf','tog-fntype'].forEach(id=>{
+    $(id).addEventListener('change', renderAllLayers);
+  });
+  $('wind-mult').addEventListener('input',e=>{
+    $('wm-val').textContent=(e.target.value/10).toFixed(1)+'×';
+    renderAllLayers();
+  });
+  $('stab-class').addEventListener('input',e=>{
+    $('sc-val').textContent=stabilityLabels[e.target.value-1];
+    renderAllLayers();
+  });
+}
+
+function updateWindBadge(w) {
+  $('wind-info').textContent=`${Math.round(w.speed)} mph ${degToCompass(w.dir)}${w.gust?` / Gust ${Math.round(w.gust)}`:''}`;
+  $('wind-src').textContent=w.source;
+}
+
+async function main() {
+  loadApiKeys();
+  initMap();
+  setupToggles();
+
+  let rawFires=await fetchFIRMS();
+  if (rawFires&&rawFires.length>5) {
+    setStep('Clustering '+rawFires.length+' satellite detections…');
+    fires=clusterFIRMS(rawFires);
+    setStatus('Live · NASA FIRMS VIIRS');
+  } else {
+    setStep('Using high-fidelity simulation…');
+    fires=simFires();
+    setStatus('Simulation · real fire locations');
+  }
+
+  const nifc=await fetchNIFCPerimeters();
+
+  setStep('Fetching surface wind data…');
+  const cf=fires[0];
+  windData=await fetchNWSWind(cf.lat,cf.lon);
+  updateWindBadge(windData);
+
+  setStep('Loading AQI and FN data…');
+  await fetchAQI();
+  await fetchFNIncidents();
+
+  setStep('Rendering all map layers…');
+  if (nifc) renderNIFCLayer(nifc);
+  renderAllLayers();
+  renderFireList();
+
+  $('loading').style.display='none';
+  setStatus(fires.length+' fires · '+fnIncidents.length+' FN incidents · '+new Date().toLocaleTimeString());
+
+  if (fires.length>0) {
+    const top=fires[0];
+    pushAlert('top',`${top.name} — ${Math.round(top.frp)} MW — ${Math.round(getSmokeReach(top.frp,windData.speed,3)/1000)}km smoke reach`,'fire');
+  }
+  const highAQI=aqiStations.filter(s=>s.aqi>150);
+  if (highAQI.length>0) pushAlert('aqi',`${highAQI.length} stations reporting Unhealthy AQI`,'aqi');
+
+  setInterval(()=>{
+    setStatus(fires.length+' fires · '+fnIncidents.length+' FN incidents · '+new Date().toLocaleTimeString());
+  },60000);
+}
+
+main().catch(e=>{ console.error(e); $('loading').style.display='none'; });
+</script>
+</body>
+</html>
