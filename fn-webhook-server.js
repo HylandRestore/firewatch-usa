@@ -82,3 +82,4 @@ app.get('/health', (req, res) => {
 });
 
 app.listen(PORT, () => console.log(`FireWatch server running on port ${PORT} — secret: ${FN_SECRET?'SET':'NOT SET'}`));
+app.use(express.static('public'));
