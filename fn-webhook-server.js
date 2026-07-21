@@ -1,15 +1,27 @@
 const express = require('express');
 const crypto  = require('crypto');
-const app     = express();
+const db       = require('./lib/db');
+const weather  = require('./lib/weather');
+const structuresLib = require('./lib/structures');
+const smokeCone = require('./lib/smokeCone');
+const risk     = require('./lib/risk');
 
+const app         = express();
 const FN_SECRET   = process.env.FN_SECRET || '';
 const PORT        = process.env.PORT || 3001;
 const TOLERANCE_S = 300;
+
+// Canonical in-memory incident store. Works standalone (no DB configured)
+// and mirrors to Postgres whenever DATABASE_URL is set. Holds BOTH FN
+// structural incidents (pushed via webhook) and wildfire/other incidents
+// synced from the client after it clusters NASA FIRMS detections.
 const incidents   = new Map();
 const sseClients  = new Set();
 
+app.use(express.json({ limit: '1mb' }));
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
   next();
 });
 
@@ -22,6 +34,20 @@ function readBody(req) {
   });
 }
 
+// ── Geocoding (server-side, for FN structural incidents which only carry
+// an address) ────────────────────────────────────────────────────────────
+async function geocodeAddress(line1, city, state, zip) {
+  try {
+    const q = encodeURIComponent(`${line1}, ${city}, ${state} ${zip}, USA`);
+    const r = await fetch(`https://nominatim.openstreetmap.org/search?q=${q}&format=json&limit=1`,
+      { headers: { 'Accept-Language': 'en', 'User-Agent': 'FireWatchUSA/1.0 (contact: chris.hyland.ch@gmail.com)' }, signal: AbortSignal.timeout(8000) });
+    const data = await r.json();
+    if (data && data[0]) return { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) };
+  } catch (e) { console.warn('[geocode] failed:', e.message); }
+  return null;
+}
+
+// ── FireNotification webhook ingestion ───────────────────────────────────
 app.post('/fn-webhook', async (req, res) => {
   const raw = await readBody(req);
   res.status(200).json({ received: true });
@@ -36,22 +62,50 @@ app.post('/fn-webhook', async (req, res) => {
     const expected = 'v1='+crypto.createHmac('sha256',FN_SECRET).update(`${ts}.${raw}`).digest('hex');
     if (sig !== expected) { console.warn('Bad signature'); return; }
   }
-  processEnvelope(envelope);
+  await processEnvelope(envelope);
 });
 
-function processEnvelope(envelope) {
+async function processEnvelope(envelope) {
   const { id, eventType, occurredAt, webhookId, businessId, data } = envelope;
   if (!data) return;
   const incidentId = data.incidentId || 'unknown';
   console.log(`[${new Date().toISOString()}] ${eventType} — incident ${incidentId}`);
+
   const existing = incidents.get(incidentId) || {};
-  incidents.set(incidentId, { ...existing, ...data, _lastEventType:eventType, _lastEventId:id, _lastEventAt:occurredAt, _webhookId:webhookId, _businessId:businessId });
+  const merged = { ...existing, ...data, _lastEventType:eventType, _lastEventId:id, _lastEventAt:occurredAt, _webhookId:webhookId, _businessId:businessId };
+  incidents.set(incidentId, merged);
+
   const payload = JSON.stringify({ eventType, incidentId, envelope });
   for (const c of sseClients) c.write(`data: ${payload}\n\n`);
+
   const a = data.address || {};
   if (eventType === 'webhook:incident.created') console.log(`  NEW: ${data.incidentType} at ${a.line1}, ${a.city} ${a.state}`);
   if (eventType === 'webhook:incident.closed')  console.log(`  CLOSED at ${data.closedAt}`);
   if (data.contact) console.log(`  CONTACT: ${data.contact}`);
+
+  // Geocode + persist in the background so the webhook response was already
+  // sent above (FN expects a fast 200 ack).
+  if (a.line1 && a.city) {
+    const geo = await geocodeAddress(a.line1, a.city, a.state, a.zipCode);
+    if (geo) {
+      merged._lat = geo.lat;
+      merged._lon = geo.lon;
+      incidents.set(incidentId, merged);
+      await db.upsertIncident({
+        id: incidentId,
+        source: 'fn_structural',
+        incident_type: data.incidentType,
+        structure_type: (data.incidentType || '').split('|')[0]?.trim(),
+        status: data.status,
+        alarm: data.alarm,
+        line1: a.line1, city: a.city, county: a.county, state: a.state, zip: a.zipCode,
+        lat: geo.lat, lon: geo.lon,
+        frp: 80 + (data.alarm || 1) * 20,
+        created_at: data.createdAt, updated_at: data.updatedAt, closed_at: data.closedAt,
+        raw_payload: envelope,
+      });
+    }
+  }
 }
 
 app.get('/fn-incidents', (req, res) => {
@@ -73,13 +127,170 @@ app.post('/fn-test/:type', async (req, res) => {
   const raw = await readBody(req);
   let body = {};
   try { body = JSON.parse(raw); } catch(e) {}
-  processEnvelope({ id:'test_'+Date.now(), eventType:req.params.type, occurredAt:new Date().toISOString(), data:body });
+  await processEnvelope({ id:'test_'+Date.now(), eventType:req.params.type, occurredAt:new Date().toISOString(), data:body });
   res.json({ ok: true });
 });
 
-app.get('/health', (req, res) => {
-  res.json({ status:'ok', incidents:incidents.size, secretConfigured:!!FN_SECRET, uptime:Math.round(process.uptime())+'s' });
+// ── Unified incident sync (wildfire clusters from client + anything else) ─
+// The browser fetches NASA FIRMS directly (Anthropic sandboxes/servers
+// shouldn't proxy that — it's a public, rate-limited, key-scoped feed), then
+// clusters it client-side, then calls this so those incidents get the same
+// persistence + weather/structure/risk pipeline as FN incidents.
+app.post('/api/incidents/sync', async (req, res) => {
+  const list = (req.body && req.body.incidents) || [];
+  let count = 0;
+  for (const f of list) {
+    if (!f.id || typeof f.lat !== 'number' || typeof f.lon !== 'number') continue;
+    incidents.set(f.id, { ...incidents.get(f.id), ...f, _lat: f.lat, _lon: f.lon });
+    await db.upsertIncident({
+      id: f.id,
+      source: f.type === 'structural' ? 'firms_structural' : 'firms_wildfire',
+      incident_type: f.type,
+      status: 'active',
+      lat: f.lat, lon: f.lon, frp: f.frp, detections: f.count || 1,
+      created_at: f.createdAt || new Date(Date.now() - (f.hoursSince||1)*3600000).toISOString(),
+      updated_at: new Date().toISOString(),
+      raw_payload: f,
+    });
+    count++;
+  }
+  res.json({ synced: count });
 });
 
-app.listen(PORT, () => console.log(`FireWatch server running on port ${PORT} — secret: ${FN_SECRET?'SET':'NOT SET'}`));
+app.get('/api/incidents', async (req, res) => {
+  const dbRows = await db.recentIncidents(parseInt(req.query.limit) || 200);
+  if (dbRows) return res.json({ incidents: dbRows, count: dbRows.length, source: 'db' });
+  // fallback: in-memory only
+  const all = Array.from(incidents.values());
+  res.json({ incidents: all, count: all.length, source: 'memory' });
+});
+
+// Look up an incident's lat/lon/frp/created_at from whatever we have handy —
+// in-memory map first (works even with no DB), then Postgres.
+function memoryLookup(id) {
+  const m = incidents.get(id);
+  if (!m) return null;
+  const lat = m._lat ?? m.lat;
+  const lon = m._lon ?? m.lon;
+  if (typeof lat !== 'number' || typeof lon !== 'number') return null;
+  return {
+    id, lat, lon,
+    frp: m.frp ?? (80 + (m.alarm || 1) * 20),
+    created_at: m.createdAt || m.created_at || new Date().toISOString(),
+  };
+}
+
+async function lookupIncident(id) {
+  const mem = memoryLookup(id);
+  if (mem) return mem;
+  if (db.isEnabled()) {
+    const row = await db.getIncidentById(id);
+    if (row) return row;
+  }
+  return null;
+}
+
+// ── Real per-incident weather (surface + elevated) ───────────────────────
+app.get('/api/incidents/:id/weather', async (req, res) => {
+  const inc = await lookupIncident(req.params.id);
+  if (!inc) return res.status(404).json({ error: 'incident not found — sync it first via /api/incidents/sync' });
+  try {
+    const w = await weather.fetchIncidentWeather(inc.lat, inc.lon);
+    await db.insertWeatherSnapshot(inc.id, { ...w.surface, observed_at: w.observed_at, source: w.source, raw: w.raw });
+    for (const lvl of w.levels) await db.insertWeatherSnapshot(inc.id, { ...lvl, observed_at: w.observed_at, source: w.source });
+    res.json(w);
+  } catch (e) {
+    console.warn('[weather] live fetch failed, using estimate:', e.message);
+    res.json(weather.estimateWeather());
+  }
+});
+
+// ── Smoke cone: couples fire intensity/duration with real wind ───────────
+async function buildSmokeCone(inc, stabilityClass) {
+  let w;
+  try { w = await weather.fetchIncidentWeather(inc.lat, inc.lon); }
+  catch (e) { w = weather.estimateWeather(); }
+  const durationHours = (Date.now() - new Date(inc.created_at).getTime()) / 3600000;
+  const cone = smokeCone.computeSmokeCone({
+    lat: inc.lat, lon: inc.lon, frp: inc.frp, durationHours,
+    weather: w, stabilityClass: stabilityClass || 3,
+  });
+  return { cone, weather: w, durationHours };
+}
+
+app.get('/api/incidents/:id/smoke-cone', async (req, res) => {
+  const inc = await lookupIncident(req.params.id);
+  if (!inc) return res.status(404).json({ error: 'incident not found' });
+  const stabilityClass = parseInt(req.query.stability) || 3;
+  const { cone, weather: w, durationHours } = await buildSmokeCone(inc, stabilityClass);
+  res.json({ incidentId: inc.id, durationHours, weather: w, ...cone });
+});
+
+// ── Real structures-at-risk (OSM Overpass) + v0 risk scoring ─────────────
+app.get('/api/incidents/:id/structures', async (req, res) => {
+  const inc = await lookupIncident(req.params.id);
+  if (!inc) return res.status(404).json({ error: 'incident not found' });
+  const stabilityClass = parseInt(req.query.stability) || 3;
+
+  try {
+    const { cone, durationHours } = await buildSmokeCone(inc, stabilityClass);
+    const rawStructures = await structuresLib.fetchStructuresNear(inc.lat, inc.lon, cone.reach_m);
+    const coefficients = await risk.loadCoefficients(db);
+    const modelVersion = 'v0-heuristic';
+
+    const results = [];
+    for (const s of rawStructures) {
+      const { distance_m, bearing_deg } = smokeCone.distanceBearing(inc.lat, inc.lon, s.lat, s.lon);
+      const inCone = smokeCone.isWithinCone(bearing_deg, cone.travel_bearing_deg, cone.half_width_deg, distance_m, cone.reach_m);
+      const scored = risk.computeStructureRisk({
+        distanceM: distance_m, reachM: cone.reach_m, inCone,
+        frpMw: inc.frp, durationHours, windSpeedMs: cone.speed_ms,
+        stabilityClass, buildingType: s.building_type, coefficients,
+      });
+      if (!inCone) continue; // only report structures actually inside the plume
+      results.push({ ...s, distance_m, bearing_deg, risk_score: scored.score, risk_tier: scored.tier });
+
+      await db.upsertStructure(s);
+      await db.insertRiskAssessment({
+        incident_id: inc.id, structure_id: s.id, distance_m, bearing_deg,
+        wind_dir_deg: cone.dir_deg, wind_speed_ms: cone.speed_ms, stability_class: stabilityClass,
+        smoke_cone_reach_m: cone.reach_m, in_cone: inCone, risk_score: scored.score,
+        risk_tier: scored.tier, model_version: modelVersion, inputs: scored.inputs,
+      });
+    }
+    results.sort((a, b) => b.risk_score - a.risk_score);
+    res.json({ incidentId: inc.id, count: results.length, structures: results, cone });
+  } catch (e) {
+    console.error('[structures] failed:', e.message);
+    res.status(502).json({ error: 'structure lookup failed', detail: e.message });
+  }
+});
+
+// ── Feedback loop stub (manual today, Monday.com-fed later) ──────────────
+// Record what actually happened at a structure so future model versions can
+// be calibrated against ground truth instead of just the v0 heuristic.
+app.post('/api/feedback', async (req, res) => {
+  const { incident_structure_id, damage_observed, damage_severity, notes } = req.body || {};
+  if (!incident_structure_id) return res.status(400).json({ error: 'incident_structure_id required' });
+  const row = await db.insertFeedback({ incident_structure_id, damage_observed, damage_severity, notes, source: 'manual' });
+  if (!row) return res.status(503).json({ error: 'no database configured — set DATABASE_URL to enable feedback storage' });
+  res.json({ ok: true, id: row.id });
+});
+
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    incidents: incidents.size,
+    secretConfigured: !!FN_SECRET,
+    dbConnected: db.isEnabled(),
+    uptime: Math.round(process.uptime()) + 's',
+  });
+});
+
 app.use(express.static('public'));
+
+async function start() {
+  await db.init();
+  app.listen(PORT, () => console.log(`FireWatch server running on port ${PORT} — secret: ${FN_SECRET?'SET':'NOT SET'} — db: ${db.isEnabled()?'CONNECTED':'not configured'}`));
+}
+start();

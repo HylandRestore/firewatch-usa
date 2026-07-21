@@ -315,12 +315,30 @@ function aqiCat(v) {
   if (v <= 300) return 'Very Unhealthy'; return 'Hazardous';
 }
 
+// Basemap: Esri World Imagery (free, no API key) — real satellite resolution
+// good enough to make out individual structures when zoomed in. Swap to
+// Google Maps/Earth tiles here later once a billed API key is available
+// (set GOOGLE_MAPS_KEY below and flip USE_GOOGLE to true).
+const USE_GOOGLE = false;
+const GOOGLE_MAPS_KEY = '';
+
 function initMap() {
   map = L.map('map', { zoomControl:false, attributionControl:false }).setView([38,-96], 4);
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-    { subdomains:'abcd', maxZoom:18 }).addTo(map);
+
+  if (USE_GOOGLE && GOOGLE_MAPS_KEY) {
+    L.tileLayer(`https://{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}&key=${GOOGLE_MAPS_KEY}`,
+      { subdomains:['mt0','mt1','mt2','mt3'], maxZoom:21 }).addTo(map);
+  } else {
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+      { maxZoom:19, attribution:'Esri World Imagery' }).addTo(map);
+    // Reference overlay: roads/place labels on top of the raw satellite tiles,
+    // similar to Google's "hybrid" mode.
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
+      { maxZoom:19, opacity:0.9 }).addTo(map);
+  }
+
   L.control.zoom({ position:'bottomright' }).addTo(map);
-  ['fires','perims','wind','smoke','aqi','struct','fn'].forEach(k => {
+  ['fires','perims','wind','smoke','aqi','struct','fn','realCone','realStruct'].forEach(k => {
     layers[k] = L.layerGroup().addTo(map);
   });
 }
@@ -694,6 +712,81 @@ try { const r = await fetch('https://firewatch-usa.onrender.com/fn-incidents'); 
   renderFNLayer();
 }
 
+// ── Real backend analysis: persists incidents to Postgres (when configured)
+// and pulls back real multi-altitude wind + real OSM structures + v0 risk
+// scores for whichever incident is currently selected. The broad map-wide
+// wind grid / smoke tint stays client-side simulation for performance (we
+// don't want to hit Overpass for every fire on screen); this real pipeline
+// runs for the one incident the user is actively inspecting.
+async function syncIncidentsToServer(list) {
+  try {
+    await fetch(FN_SERVER + '/api/incidents/sync', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ incidents: list.map(f => ({
+        id: f.id, lat: f.lat, lon: f.lon, frp: f.frp, type: f.type,
+        count: f.count, hoursSince: f.hoursSince, createdAt: f.date,
+      })) }),
+    });
+  } catch (e) { console.warn('incident sync failed', e); }
+}
+
+async function fetchRealAnalysis(incidentId) {
+  try {
+    const sRes = await fetch(`${FN_SERVER}/api/incidents/${encodeURIComponent(incidentId)}/structures?stability=${$('stab-class').value}`);
+    if (!sRes.ok) return null;
+    return await sRes.json();
+  } catch (e) { console.warn('real analysis fetch failed', e); return null; }
+}
+
+function renderRealLayers(structData) {
+  layers.realCone.clearLayers();
+  layers.realStruct.clearLayers();
+  if (!structData) return;
+  if (structData.cone && structData.cone.geometry) {
+    const coords = structData.cone.geometry.coordinates[0].map(([lon, lat]) => [lat, lon]);
+    layers.realCone.addLayer(L.polygon(coords, { color:'#00C9A7', fillColor:'#00C9A7', fillOpacity:.08, weight:1.5, dashArray:'2 4' }));
+  }
+  (structData.structures || []).forEach(s => {
+    const c = s.risk_tier === 'High' ? '#FF1744' : s.risk_tier === 'Moderate' ? '#FF6B00' : '#FFB800';
+    const m = L.circleMarker([s.lat, s.lon], { radius:4, color:'#0a0a0f', fillColor:c, fillOpacity:.9, weight:1 });
+    m.bindTooltip(`${s.building_type||'Structure'}${s.address?': '+s.address:''}<br>${s.risk_tier} risk — ${(s.risk_score*100).toFixed(0)}% damage chance<br>${(s.distance_m/1000).toFixed(2)}km from source`,{sticky:true});
+    layers.realStruct.addLayer(m);
+  });
+}
+
+function realAnalysisHtml(structData, loading) {
+  if (loading) return `<div class="tsect"><div class="tlabel">Real-time structure analysis</div>
+    <div style="font-size:10px;color:var(--faint)">Fetching real OSM structures + live wind + v0 risk model…</div></div>`;
+  if (!structData) return `<div class="tsect"><div class="tlabel">Real-time structure analysis</div>
+    <div style="font-size:10px;color:var(--faint)">Backend unavailable — showing simulated estimate only above.</div></div>`;
+  const s = structData.structures || [];
+  const hi = s.filter(x=>x.risk_tier==='High').length, mo = s.filter(x=>x.risk_tier==='Moderate').length, lo = s.filter(x=>x.risk_tier==='Low').length;
+  const top = s.slice(0,6).map(x=>`
+    <div class="titem">
+      <div class="fn-struct-icon" style="background:${x.risk_tier==='High'?'#FF1744':x.risk_tier==='Moderate'?'#FF6B00':'#FFB800'}"></div>
+      ${(x.risk_score*100).toFixed(0)}% — ${x.building_type||'structure'}${x.address?' · '+x.address:''} · ${(x.distance_m/1000).toFixed(1)}km
+    </div>`).join('');
+  return `<div class="tsect">
+    <div class="tlabel">Real-time structure analysis (v0 model)</div>
+    <div style="font-size:9px;color:var(--faint);margin-bottom:5px">${s.length} real OSM structures inside computed smoke cone</div>
+    <div class="titem"><div class="tdot" style="background:#FF1744"></div><strong style="color:var(--text)">${hi}</strong>&nbsp;High damage-chance</div>
+    <div class="titem"><div class="tdot" style="background:#FF6B00"></div><strong style="color:var(--text)">${mo}</strong>&nbsp;Moderate</div>
+    <div class="titem"><div class="tdot" style="background:#FFB800"></div><strong style="color:var(--text)">${lo}</strong>&nbsp;Low</div>
+    ${top}
+  </div>`;
+}
+
+async function loadRealAnalysis(incidentId) {
+  const marker = document.createElement('div');
+  marker.id = 'real-analysis-slot';
+  marker.innerHTML = realAnalysisHtml(null, true);
+  $('drawer-content').appendChild(marker);
+  const data = await fetchRealAnalysis(incidentId);
+  const slot = document.getElementById('real-analysis-slot');
+  if (slot) slot.innerHTML = realAnalysisHtml(data, false);
+  renderRealLayers(data);
+}
+
 // Entry point for live webhook payloads arriving from your server proxy
 function ingestFNPayload(envelope) {
   const inc = parseFNPayload(envelope);
@@ -804,6 +897,7 @@ function showFNDrawer(inc) {
       Source: FireNotification Webhook v1.02
     </div>`;
   $('drawer').classList.add('open');
+  if (inc.incidentId) loadRealAnalysis(inc.incidentId);
 }
 
 function renderWindLayer() {
@@ -986,6 +1080,7 @@ function selectFire(f) {
   if (el) el.classList.add('active');
   map.flyTo([f.lat,f.lon],9,{duration:1.1});
   showFireDrawer(f);
+  loadRealAnalysis(f.id);
 }
 
 function showFireDrawer(f) {
@@ -1087,6 +1182,8 @@ async function main() {
     fires=simFires();
     setStatus('Simulation · real fire locations');
   }
+
+  syncIncidentsToServer(fires); // persist to Postgres in the background (no-op if backend has no DB configured yet)
 
   const nifc=await fetchNIFCPerimeters();
 
