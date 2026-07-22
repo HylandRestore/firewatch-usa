@@ -22,7 +22,17 @@ const incidents   = new Map();
 const syncedCache = new Map();
 const sseClients  = new Set();
 
-app.use(express.json({ limit: '1mb' }));
+// IMPORTANT: express.json() must NOT be applied globally. /fn-webhook and
+// /fn-test/:type read the raw request body themselves (readBody, below) so
+// they can verify FN's HMAC signature against the exact raw bytes. A global
+// express.json() middleware would consume the request stream first, leaving
+// nothing for readBody() to read — its stream listeners attach after the
+// stream already ended, so the promise never resolves and the route never
+// responds at all. That's exactly what was silently breaking FN delivery:
+// zero response ever sent back, so every webhook attempt timed out.
+// Only the new JSON API routes get express.json(), applied per-route below.
+const jsonBody = express.json({ limit: '1mb' });
+
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Headers', 'Content-Type');
@@ -140,7 +150,7 @@ app.post('/fn-test/:type', async (req, res) => {
 // shouldn't proxy that — it's a public, rate-limited, key-scoped feed), then
 // clusters it client-side, then calls this so those incidents get the same
 // persistence + weather/structure/risk pipeline as FN incidents.
-app.post('/api/incidents/sync', async (req, res) => {
+app.post('/api/incidents/sync', jsonBody, async (req, res) => {
   const list = (req.body && req.body.incidents) || [];
   let count = 0;
   for (const f of list) {
@@ -276,7 +286,7 @@ app.get('/api/incidents/:id/structures', async (req, res) => {
 // ── Feedback loop stub (manual today, Monday.com-fed later) ──────────────
 // Record what actually happened at a structure so future model versions can
 // be calibrated against ground truth instead of just the v0 heuristic.
-app.post('/api/feedback', async (req, res) => {
+app.post('/api/feedback', jsonBody, async (req, res) => {
   const { incident_structure_id, damage_observed, damage_severity, notes } = req.body || {};
   if (!incident_structure_id) return res.status(400).json({ error: 'incident_structure_id required' });
   const row = await db.insertFeedback({ incident_structure_id, damage_observed, damage_severity, notes, source: 'manual' });
