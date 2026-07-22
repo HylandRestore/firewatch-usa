@@ -11,11 +11,15 @@ const FN_SECRET   = process.env.FN_SECRET || '';
 const PORT        = process.env.PORT || 3001;
 const TOLERANCE_S = 300;
 
-// Canonical in-memory incident store. Works standalone (no DB configured)
-// and mirrors to Postgres whenever DATABASE_URL is set. Holds BOTH FN
-// structural incidents (pushed via webhook) and wildfire/other incidents
-// synced from the client after it clusters NASA FIRMS detections.
+// Two SEPARATE in-memory stores, both mirrored to Postgres when configured:
+//   - incidents: real FireNotification structural incidents, pushed via
+//     webhook. This is what /fn-incidents (the FN Feed tab) reads from.
+//   - syncedCache: wildfire/simulated incidents synced from the client after
+//     it clusters NASA FIRMS detections. Used ONLY as a lookup cache for the
+//     weather/smoke-cone/structures endpoints — never exposed via
+//     /fn-incidents, so it can't leak into the FN Feed UI.
 const incidents   = new Map();
+const syncedCache = new Map();
 const sseClients  = new Set();
 
 app.use(express.json({ limit: '1mb' }));
@@ -141,7 +145,7 @@ app.post('/api/incidents/sync', async (req, res) => {
   let count = 0;
   for (const f of list) {
     if (!f.id || typeof f.lat !== 'number' || typeof f.lon !== 'number') continue;
-    incidents.set(f.id, { ...incidents.get(f.id), ...f, _lat: f.lat, _lon: f.lon });
+    syncedCache.set(f.id, { ...syncedCache.get(f.id), ...f, _lat: f.lat, _lon: f.lon });
     await db.upsertIncident({
       id: f.id,
       source: f.type === 'structural' ? 'firms_structural' : 'firms_wildfire',
@@ -160,15 +164,18 @@ app.post('/api/incidents/sync', async (req, res) => {
 app.get('/api/incidents', async (req, res) => {
   const dbRows = await db.recentIncidents(parseInt(req.query.limit) || 200);
   if (dbRows) return res.json({ incidents: dbRows, count: dbRows.length, source: 'db' });
-  // fallback: in-memory only
-  const all = Array.from(incidents.values());
+  // fallback: in-memory only — merge both stores since this endpoint (unlike
+  // /fn-incidents) is meant to represent everything we know about.
+  const all = [...incidents.values(), ...syncedCache.values()];
   res.json({ incidents: all, count: all.length, source: 'memory' });
 });
 
 // Look up an incident's lat/lon/frp/created_at from whatever we have handy —
-// in-memory map first (works even with no DB), then Postgres.
+// in-memory first (works even with no DB), then Postgres. Checks the FN map
+// and the synced-wildfire cache, since either kind of incident can be the
+// target of a weather/smoke-cone/structures lookup.
 function memoryLookup(id) {
-  const m = incidents.get(id);
+  const m = incidents.get(id) || syncedCache.get(id);
   if (!m) return null;
   const lat = m._lat ?? m.lat;
   const lon = m._lon ?? m.lon;
