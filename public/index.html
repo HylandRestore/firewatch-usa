@@ -636,11 +636,33 @@ async function geocodeFNAddress(inc) {
 }
 
 async function fetchFNIncidents() {
-try { const r = await fetch('https://firewatch-usa.onrender.com/fn-incidents'); const data = await r.json(); if(data.incidents&&data.incidents.length>0){const parsed=data.incidents.map(i=>parseFNPayload({id:i._lastEventId,eventType:i._lastEventType,occurredAt:i._lastEventAt,data:i})); Promise.all(parsed.map(p=>geocodeFNAddress(p))).then(geo=>{fnIncidents=[...geo.filter(g=>g.lat),...fnIncidents];renderFNLayer();renderFireList();});} } catch(e) { console.warn('FN server',e); }
-  // FN is webhook-based (push), not poll-based.
-  // Simulate the three real sample payloads from the spec for demo purposes.
-  // In production: POST arrives at your server → verify HMAC-SHA256 signature
-  // → call ingestFNPayload(envelope) → map updates in real time.
+  setStep('Loading FireNotification incidents…');
+  try {
+    const r = await fetch(FN_SERVER + '/fn-incidents');
+    const data = await r.json();
+    if (data.incidents && data.incidents.length > 0) {
+      // Server already geocodes every incident on ingestion (including a
+      // lazy fallback for incidents whose address-carrying event arrived
+      // late) — use those coordinates directly instead of re-geocoding
+      // client-side. Doing it client-side used to fire one Nominatim
+      // request per incident in parallel via Promise.all, which gets
+      // silently rate-limited/blocked once there are more than a handful
+      // of real incidents, and was why real incidents stopped appearing
+      // once volume picked up.
+      const real = data.incidents
+        .map(i => ({ ...parseFNPayload({ id:i._lastEventId, eventType:i._lastEventType, occurredAt:i._lastEventAt, data:i }), lat: i._lat, lon: i._lon }))
+        .filter(inc => typeof inc.lat === 'number' && typeof inc.lon === 'number');
+      fnIncidents = real;
+      setBadge('badge-fn', true);
+      renderFNLayer();
+      renderFireList();
+      return; // real data loaded — skip the demo fallback below
+    }
+  } catch(e) { console.warn('FN server', e); }
+
+  // No real incidents yet (fresh deploy, or webhook hasn't fired) — show
+  // three illustrative demo payloads from the FN spec so the FN Feed isn't
+  // empty on first load. These get replaced entirely once real data exists.
   setStep('Loading FireNotification webhook simulation…');
 
   const samplePayloads = [
