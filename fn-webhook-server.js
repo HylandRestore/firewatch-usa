@@ -379,8 +379,39 @@ app.get('/health', (req, res) => {
 
 app.use(express.static('public'));
 
+// Render restarts this process on every deploy (and free-tier instances can
+// restart after sleeping), which wipes the in-memory maps. Without this, a
+// redeploy looks like every incident vanished even though they're safely in
+// Postgres — /fn-incidents just wasn't reading from there. Rebuild both
+// in-memory stores from Supabase on boot so a restart never loses history
+// the app already has.
+async function hydrateFromDb() {
+  if (!db.isEnabled()) return;
+  const rows = await db.recentIncidents(500);
+  if (!rows) return;
+  let fnCount = 0, syncedCount = 0;
+  for (const row of rows) {
+    if (row.source === 'fn_structural') {
+      const payload = row.raw_payload || {};
+      const data = payload.data || {};
+      incidents.set(row.id, {
+        ...data,
+        _lat: row.lat, _lon: row.lon,
+        _lastEventType: payload.eventType, _lastEventId: payload.id,
+        _lastEventAt: payload.occurredAt, _webhookId: payload.webhookId, _businessId: payload.businessId,
+      });
+      fnCount++;
+    } else {
+      syncedCache.set(row.id, { ...(row.raw_payload || {}), id: row.id, lat: row.lat, lon: row.lon, frp: row.frp, _lat: row.lat, _lon: row.lon });
+      syncedCount++;
+    }
+  }
+  console.log(`[hydrate] restored ${fnCount} FN incidents + ${syncedCount} synced incidents from Supabase`);
+}
+
 async function start() {
   await db.init();
+  await hydrateFromDb();
   app.listen(PORT, () => console.log(`FireWatch server running on port ${PORT} — secret: ${FN_SECRET?'SET':'NOT SET'} — db: ${db.isEnabled()?'CONNECTED':'not configured'}`));
 }
 start();
