@@ -752,42 +752,73 @@ async function syncIncidentsToServer(list) {
   } catch (e) { console.warn('incident sync failed', e); }
 }
 
-async function fetchRealAnalysis(incidentId) {
+// Cone and structures are fetched SEPARATELY on purpose. The cone only needs
+// real wind data (fast, reliable, no external rate limits) — the structures
+// list needs OSM Overpass, which is a shared public service that can be
+// rate-limited. Bundling them meant an Overpass hiccup threw away a cone
+// that had already been computed successfully. Splitting them means the
+// cone always renders as long as the wind lookup works, independent of
+// whether the building-level list succeeds.
+async function fetchSmokeCone(incidentId) {
   try {
-    const sRes = await fetch(`${FN_SERVER}/api/incidents/${encodeURIComponent(incidentId)}/structures?stability=${$('stab-class').value}`);
-    const body = await sRes.json().catch(() => null);
-    if (!sRes.ok) return { error: true, reason: (body && (body.reason || body.detail || body.error)) || `Request failed (${sRes.status})` };
+    const r = await fetch(`${FN_SERVER}/api/incidents/${encodeURIComponent(incidentId)}/smoke-cone?stability=${$('stab-class').value}`);
+    const body = await r.json().catch(() => null);
+    if (!r.ok) return { error: true, reason: (body && (body.reason || body.detail || body.error)) || `Request failed (${r.status})` };
     return body;
   } catch (e) {
-    console.warn('real analysis fetch failed', e);
+    console.warn('smoke-cone fetch failed', e);
     return { error: true, reason: 'Could not reach the FireWatch server — check your connection.' };
   }
 }
 
-function renderRealLayers(structData) {
+async function fetchStructuresOnly(incidentId) {
+  try {
+    const r = await fetch(`${FN_SERVER}/api/incidents/${encodeURIComponent(incidentId)}/structures?stability=${$('stab-class').value}`);
+    const body = await r.json().catch(() => null);
+    if (!r.ok) return { error: true, reason: (body && (body.reason || body.detail || body.error)) || `Request failed (${r.status})` };
+    return body;
+  } catch (e) {
+    console.warn('structures fetch failed', e);
+    return { error: true, reason: 'Could not reach the FireWatch server — check your connection.' };
+  }
+}
+
+function renderConeLayer(coneData) {
   layers.realCone.clearLayers();
+  if (!coneData || coneData.error || !coneData.geometry) return null;
+  const coords = coneData.geometry.coordinates[0].map(([lon, lat]) => [lat, lon]);
+  const coneLayer = L.polygon(coords, { color:'#00ffe0', fillColor:'#00ffe0', fillOpacity:.16, weight:2.5, dashArray:'6 4' });
+  layers.realCone.addLayer(coneLayer);
+  // Bring the cone into view — a real building-level analysis is easy to
+  // miss if the map is still zoomed out to a national view.
+  map.fitBounds(coneLayer.getBounds(), { padding: [50, 50], maxZoom: 12 });
+  return coneLayer;
+}
+
+function renderStructureLayer(structData) {
   layers.realStruct.clearLayers();
   if (!structData || structData.error) return;
-  let coneLayer = null;
-  if (structData.cone && structData.cone.geometry) {
-    const coords = structData.cone.geometry.coordinates[0].map(([lon, lat]) => [lat, lon]);
-    coneLayer = L.polygon(coords, { color:'#00ffe0', fillColor:'#00ffe0', fillOpacity:.16, weight:2.5, dashArray:'6 4' });
-    layers.realCone.addLayer(coneLayer);
-  }
   (structData.structures || []).forEach(s => {
     const c = s.risk_tier === 'High' ? '#FF1744' : s.risk_tier === 'Moderate' ? '#FF6B00' : '#FFB800';
     const m = L.circleMarker([s.lat, s.lon], { radius:5, color:'#0a0a0f', fillColor:c, fillOpacity:.9, weight:1.5 });
     m.bindTooltip(`${s.building_type||'Structure'}${s.address?': '+s.address:''}<br>${s.risk_tier} risk — ${(s.risk_score*100).toFixed(0)}% damage chance<br>${(s.distance_m/1000).toFixed(2)}km from source`,{sticky:true});
     layers.realStruct.addLayer(m);
   });
-  // Bring the cone into view — a real building-level analysis is easy to
-  // miss if the map is still zoomed out to a national view.
-  if (coneLayer) map.fitBounds(coneLayer.getBounds(), { padding: [50, 50], maxZoom: 12 });
 }
 
-function realAnalysisHtml(structData, loading, incidentId) {
+function coneStatusHtml(coneData, loading) {
+  if (loading) return `<div class="tsect"><div class="tlabel">Smoke cone</div>
+    <div style="font-size:10px;color:var(--faint)">Fetching live wind data…</div></div>`;
+  if (!coneData || coneData.error) return `<div class="tsect"><div class="tlabel">Smoke cone</div>
+    <div style="font-size:10px;color:var(--red)">${(coneData && coneData.reason) || 'Backend unavailable.'}</div></div>`;
+  return `<div class="tsect"><div class="tlabel">Smoke cone</div>
+    <div style="font-size:11px;color:var(--teal)">${Math.round(coneData.speed_ms*2.237)} mph ${degToCompass(coneData.dir_deg)} — reach ~${Math.round(coneData.reach_m/1000)}km</div>
+    <div style="font-size:9px;color:var(--faint);margin-top:2px">Wind at incident time · ${coneData.weather?.source||'—'}</div></div>`;
+}
+
+function structuresStatusHtml(structData, loading, incidentId) {
   if (loading) return `<div class="tsect"><div class="tlabel">Real-time structure analysis</div>
-    <div style="font-size:10px;color:var(--faint)">Fetching real OSM structures + live wind + v0 risk model… (can take up to 20s)</div></div>`;
+    <div style="font-size:10px;color:var(--faint)">Fetching real OSM structures + v0 risk model… (can take up to 20s)</div></div>`;
   if (!structData || structData.error) return `<div class="tsect"><div class="tlabel">Real-time structure analysis</div>
     <div style="font-size:10px;color:var(--red)">${(structData && structData.reason) || 'Backend unavailable.'}</div></div>`;
   const s = structData.structures || [];
@@ -810,14 +841,27 @@ function realAnalysisHtml(structData, loading, incidentId) {
 }
 
 async function loadRealAnalysis(incidentId) {
-  const marker = document.createElement('div');
-  marker.id = 'real-analysis-slot';
-  marker.innerHTML = realAnalysisHtml(null, true);
-  $('drawer-content').appendChild(marker);
-  const data = await fetchRealAnalysis(incidentId);
-  const slot = document.getElementById('real-analysis-slot');
-  if (slot) slot.innerHTML = realAnalysisHtml(data, false, incidentId);
-  renderRealLayers(data);
+  const coneSlot = document.createElement('div');
+  coneSlot.id = 'cone-status-slot';
+  coneSlot.innerHTML = coneStatusHtml(null, true);
+  $('drawer-content').appendChild(coneSlot);
+
+  const structSlot = document.createElement('div');
+  structSlot.id = 'real-analysis-slot';
+  structSlot.innerHTML = structuresStatusHtml(null, true);
+  $('drawer-content').appendChild(structSlot);
+
+  // Cone first — fast, and doesn't depend on Overpass at all.
+  const coneData = await fetchSmokeCone(incidentId);
+  const cSlot = document.getElementById('cone-status-slot');
+  if (cSlot) cSlot.innerHTML = coneStatusHtml(coneData, false);
+  renderConeLayer(coneData);
+
+  // Structures list — slower, can fail independently without affecting the cone above.
+  const structData = await fetchStructuresOnly(incidentId);
+  const sSlot = document.getElementById('real-analysis-slot');
+  if (sSlot) sSlot.innerHTML = structuresStatusHtml(structData, false, incidentId);
+  renderStructureLayer(structData);
 }
 
 // Entry point for live webhook payloads arriving from your server proxy
