@@ -246,7 +246,7 @@ app.get('/api/incidents/:id/weather', async (req, res) => {
   const inc = await lookupIncident(req.params.id);
   if (!inc) return res.status(404).json({ error: 'incident not found — sync it first via /api/incidents/sync' });
   try {
-    const w = await weather.fetchIncidentWeather(inc.lat, inc.lon);
+    const w = await weather.fetchIncidentWeather(inc.lat, inc.lon, inc.created_at);
     await db.insertWeatherSnapshot(inc.id, { ...w.surface, observed_at: w.observed_at, source: w.source, raw: w.raw });
     for (const lvl of w.levels) await db.insertWeatherSnapshot(inc.id, { ...lvl, observed_at: w.observed_at, source: w.source });
     res.json(w);
@@ -259,7 +259,7 @@ app.get('/api/incidents/:id/weather', async (req, res) => {
 // ── Smoke cone: couples fire intensity/duration with real wind ───────────
 async function buildSmokeCone(inc, stabilityClass) {
   let w;
-  try { w = await weather.fetchIncidentWeather(inc.lat, inc.lon); }
+  try { w = await weather.fetchIncidentWeather(inc.lat, inc.lon, inc.created_at); }
   catch (e) { w = weather.estimateWeather(); }
   const durationHours = (Date.now() - new Date(inc.created_at).getTime()) / 3600000;
   const cone = smokeCone.computeSmokeCone({
