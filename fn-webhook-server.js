@@ -197,9 +197,43 @@ function memoryLookup(id) {
   };
 }
 
+// Lazy geocode fallback: an FN incident can end up with no _lat/_lon if the
+// one event that carried its address (usually "incident.created") never
+// successfully delivered, even though later events for the same incident
+// did. Rather than permanently losing the ability to analyze it, check
+// whatever address fields we DO have in the merged record and geocode now,
+// on demand, the first time someone actually looks at this incident.
+async function lazyGeocodeFallback(id) {
+  const m = incidents.get(id);
+  if (!m) return null;
+  const a = m.address || {};
+  if (!a.line1 || !a.city) return null; // truly no address data available anywhere
+  const geo = await geocodeAddress(a.line1, a.city, a.state, a.zipCode);
+  if (!geo) return null;
+
+  m._lat = geo.lat;
+  m._lon = geo.lon;
+  incidents.set(id, m);
+
+  const frp = 80 + (m.alarm || 1) * 20;
+  await db.upsertIncident({
+    id, source: 'fn_structural', incident_type: m.incidentType,
+    structure_type: (m.incidentType || '').split('|')[0]?.trim(),
+    status: m.status, alarm: m.alarm,
+    line1: a.line1, city: a.city, county: a.county, state: a.state, zip: a.zipCode,
+    lat: geo.lat, lon: geo.lon, frp,
+    created_at: m.createdAt, updated_at: m.updatedAt, closed_at: m.closedAt,
+    raw_payload: m,
+  });
+
+  return { id, lat: geo.lat, lon: geo.lon, frp, created_at: m.createdAt || new Date().toISOString() };
+}
+
 async function lookupIncident(id) {
   const mem = memoryLookup(id);
   if (mem) return mem;
+  const lazy = await lazyGeocodeFallback(id);
+  if (lazy) return lazy;
   if (db.isEnabled()) {
     const row = await db.getIncidentById(id);
     if (row) return row;
@@ -244,42 +278,81 @@ app.get('/api/incidents/:id/smoke-cone', async (req, res) => {
 });
 
 // ── Real structures-at-risk (OSM Overpass) + v0 risk scoring ─────────────
+// Shared by the JSON endpoint and the CSV export so both always agree.
+async function computeStructuresAtRisk(inc, stabilityClass) {
+  const { cone, durationHours } = await buildSmokeCone(inc, stabilityClass);
+  const rawStructures = await structuresLib.fetchStructuresNear(inc.lat, inc.lon, cone.reach_m);
+  const coefficients = await risk.loadCoefficients(db);
+  const modelVersion = 'v0-heuristic';
+
+  const results = [];
+  for (const s of rawStructures) {
+    const { distance_m, bearing_deg } = smokeCone.distanceBearing(inc.lat, inc.lon, s.lat, s.lon);
+    const inCone = smokeCone.isWithinCone(bearing_deg, cone.travel_bearing_deg, cone.half_width_deg, distance_m, cone.reach_m);
+    const scored = risk.computeStructureRisk({
+      distanceM: distance_m, reachM: cone.reach_m, inCone,
+      frpMw: inc.frp, durationHours, windSpeedMs: cone.speed_ms,
+      stabilityClass, buildingType: s.building_type, coefficients,
+    });
+    if (!inCone) continue; // only report structures actually inside the plume
+    results.push({ ...s, distance_m, bearing_deg, risk_score: scored.score, risk_tier: scored.tier });
+
+    await db.upsertStructure(s);
+    await db.insertRiskAssessment({
+      incident_id: inc.id, structure_id: s.id, distance_m, bearing_deg,
+      wind_dir_deg: cone.dir_deg, wind_speed_ms: cone.speed_ms, stability_class: stabilityClass,
+      smoke_cone_reach_m: cone.reach_m, in_cone: inCone, risk_score: scored.score,
+      risk_tier: scored.tier, model_version: modelVersion, inputs: scored.inputs,
+    });
+  }
+  results.sort((a, b) => b.risk_score - a.risk_score);
+  return { results, cone };
+}
+
 app.get('/api/incidents/:id/structures', async (req, res) => {
   const inc = await lookupIncident(req.params.id);
-  if (!inc) return res.status(404).json({ error: 'incident not found' });
+  if (!inc) return res.status(404).json({
+    error: 'incident not found',
+    reason: 'No location data available for this incident yet — the event carrying its address may not have been received, or geocoding failed.',
+  });
   const stabilityClass = parseInt(req.query.stability) || 3;
 
   try {
-    const { cone, durationHours } = await buildSmokeCone(inc, stabilityClass);
-    const rawStructures = await structuresLib.fetchStructuresNear(inc.lat, inc.lon, cone.reach_m);
-    const coefficients = await risk.loadCoefficients(db);
-    const modelVersion = 'v0-heuristic';
-
-    const results = [];
-    for (const s of rawStructures) {
-      const { distance_m, bearing_deg } = smokeCone.distanceBearing(inc.lat, inc.lon, s.lat, s.lon);
-      const inCone = smokeCone.isWithinCone(bearing_deg, cone.travel_bearing_deg, cone.half_width_deg, distance_m, cone.reach_m);
-      const scored = risk.computeStructureRisk({
-        distanceM: distance_m, reachM: cone.reach_m, inCone,
-        frpMw: inc.frp, durationHours, windSpeedMs: cone.speed_ms,
-        stabilityClass, buildingType: s.building_type, coefficients,
-      });
-      if (!inCone) continue; // only report structures actually inside the plume
-      results.push({ ...s, distance_m, bearing_deg, risk_score: scored.score, risk_tier: scored.tier });
-
-      await db.upsertStructure(s);
-      await db.insertRiskAssessment({
-        incident_id: inc.id, structure_id: s.id, distance_m, bearing_deg,
-        wind_dir_deg: cone.dir_deg, wind_speed_ms: cone.speed_ms, stability_class: stabilityClass,
-        smoke_cone_reach_m: cone.reach_m, in_cone: inCone, risk_score: scored.score,
-        risk_tier: scored.tier, model_version: modelVersion, inputs: scored.inputs,
-      });
-    }
-    results.sort((a, b) => b.risk_score - a.risk_score);
+    const { results, cone } = await computeStructuresAtRisk(inc, stabilityClass);
     res.json({ incidentId: inc.id, count: results.length, structures: results, cone });
   } catch (e) {
     console.error('[structures] failed:', e.message);
     res.status(502).json({ error: 'structure lookup failed', detail: e.message });
+  }
+});
+
+// ── CSV export: addresses potentially affected by smoke for one incident ──
+function csvEscape(v) {
+  if (v === null || v === undefined) return '';
+  const s = String(v);
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+app.get('/api/incidents/:id/structures.csv', async (req, res) => {
+  const inc = await lookupIncident(req.params.id);
+  if (!inc) return res.status(404).send('incident not found — no location data available yet');
+  const stabilityClass = parseInt(req.query.stability) || 3;
+
+  try {
+    const { results, cone } = await computeStructuresAtRisk(inc, stabilityClass);
+    const header = ['address', 'city_or_name', 'building_type', 'distance_m', 'bearing_deg', 'risk_score', 'risk_tier', 'lat', 'lon'];
+    const rows = results.map(s => [
+      s.address || '', s.name || '', s.building_type || '', Math.round(s.distance_m),
+      Math.round(s.bearing_deg), s.risk_score.toFixed(3), s.risk_tier, s.lat, s.lon,
+    ]);
+    const csv = [header, ...rows].map(r => r.map(csvEscape).join(',')).join('\n');
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="firewatch-${inc.id}-structures-at-risk.csv"`);
+    res.send(csv);
+  } catch (e) {
+    console.error('[structures.csv] failed:', e.message);
+    res.status(502).send('structure lookup failed: ' + e.message);
   }
 });
 

@@ -733,32 +733,41 @@ async function syncIncidentsToServer(list) {
 async function fetchRealAnalysis(incidentId) {
   try {
     const sRes = await fetch(`${FN_SERVER}/api/incidents/${encodeURIComponent(incidentId)}/structures?stability=${$('stab-class').value}`);
-    if (!sRes.ok) return null;
-    return await sRes.json();
-  } catch (e) { console.warn('real analysis fetch failed', e); return null; }
+    const body = await sRes.json().catch(() => null);
+    if (!sRes.ok) return { error: true, reason: (body && (body.reason || body.detail || body.error)) || `Request failed (${sRes.status})` };
+    return body;
+  } catch (e) {
+    console.warn('real analysis fetch failed', e);
+    return { error: true, reason: 'Could not reach the FireWatch server — check your connection.' };
+  }
 }
 
 function renderRealLayers(structData) {
   layers.realCone.clearLayers();
   layers.realStruct.clearLayers();
-  if (!structData) return;
+  if (!structData || structData.error) return;
+  let coneLayer = null;
   if (structData.cone && structData.cone.geometry) {
     const coords = structData.cone.geometry.coordinates[0].map(([lon, lat]) => [lat, lon]);
-    layers.realCone.addLayer(L.polygon(coords, { color:'#00C9A7', fillColor:'#00C9A7', fillOpacity:.08, weight:1.5, dashArray:'2 4' }));
+    coneLayer = L.polygon(coords, { color:'#00ffe0', fillColor:'#00ffe0', fillOpacity:.16, weight:2.5, dashArray:'6 4' });
+    layers.realCone.addLayer(coneLayer);
   }
   (structData.structures || []).forEach(s => {
     const c = s.risk_tier === 'High' ? '#FF1744' : s.risk_tier === 'Moderate' ? '#FF6B00' : '#FFB800';
-    const m = L.circleMarker([s.lat, s.lon], { radius:4, color:'#0a0a0f', fillColor:c, fillOpacity:.9, weight:1 });
+    const m = L.circleMarker([s.lat, s.lon], { radius:5, color:'#0a0a0f', fillColor:c, fillOpacity:.9, weight:1.5 });
     m.bindTooltip(`${s.building_type||'Structure'}${s.address?': '+s.address:''}<br>${s.risk_tier} risk — ${(s.risk_score*100).toFixed(0)}% damage chance<br>${(s.distance_m/1000).toFixed(2)}km from source`,{sticky:true});
     layers.realStruct.addLayer(m);
   });
+  // Bring the cone into view — a real building-level analysis is easy to
+  // miss if the map is still zoomed out to a national view.
+  if (coneLayer) map.fitBounds(coneLayer.getBounds(), { padding: [50, 50], maxZoom: 12 });
 }
 
-function realAnalysisHtml(structData, loading) {
+function realAnalysisHtml(structData, loading, incidentId) {
   if (loading) return `<div class="tsect"><div class="tlabel">Real-time structure analysis</div>
-    <div style="font-size:10px;color:var(--faint)">Fetching real OSM structures + live wind + v0 risk model…</div></div>`;
-  if (!structData) return `<div class="tsect"><div class="tlabel">Real-time structure analysis</div>
-    <div style="font-size:10px;color:var(--faint)">Backend unavailable — showing simulated estimate only above.</div></div>`;
+    <div style="font-size:10px;color:var(--faint)">Fetching real OSM structures + live wind + v0 risk model… (can take up to 20s)</div></div>`;
+  if (!structData || structData.error) return `<div class="tsect"><div class="tlabel">Real-time structure analysis</div>
+    <div style="font-size:10px;color:var(--red)">${(structData && structData.reason) || 'Backend unavailable.'}</div></div>`;
   const s = structData.structures || [];
   const hi = s.filter(x=>x.risk_tier==='High').length, mo = s.filter(x=>x.risk_tier==='Moderate').length, lo = s.filter(x=>x.risk_tier==='Low').length;
   const top = s.slice(0,6).map(x=>`
@@ -766,6 +775,7 @@ function realAnalysisHtml(structData, loading) {
       <div class="fn-struct-icon" style="background:${x.risk_tier==='High'?'#FF1744':x.risk_tier==='Moderate'?'#FF6B00':'#FFB800'}"></div>
       ${(x.risk_score*100).toFixed(0)}% — ${x.building_type||'structure'}${x.address?' · '+x.address:''} · ${(x.distance_m/1000).toFixed(1)}km
     </div>`).join('');
+  const csvUrl = `${FN_SERVER}/api/incidents/${encodeURIComponent(incidentId)}/structures.csv?stability=${$('stab-class').value}`;
   return `<div class="tsect">
     <div class="tlabel">Real-time structure analysis (v0 model)</div>
     <div style="font-size:9px;color:var(--faint);margin-bottom:5px">${s.length} real OSM structures inside computed smoke cone</div>
@@ -773,6 +783,7 @@ function realAnalysisHtml(structData, loading) {
     <div class="titem"><div class="tdot" style="background:#FF6B00"></div><strong style="color:var(--text)">${mo}</strong>&nbsp;Moderate</div>
     <div class="titem"><div class="tdot" style="background:#FFB800"></div><strong style="color:var(--text)">${lo}</strong>&nbsp;Low</div>
     ${top}
+    ${s.length > 0 ? `<a href="${csvUrl}" download style="display:block;text-align:center;margin-top:10px;padding:7px;background:#141420;border:1px solid var(--border2);border-radius:5px;font-size:10px;color:var(--teal);text-decoration:none">⬇ Export ${s.length} addresses (CSV)</a>` : ''}
   </div>`;
 }
 
@@ -783,7 +794,7 @@ async function loadRealAnalysis(incidentId) {
   $('drawer-content').appendChild(marker);
   const data = await fetchRealAnalysis(incidentId);
   const slot = document.getElementById('real-analysis-slot');
-  if (slot) slot.innerHTML = realAnalysisHtml(data, false);
+  if (slot) slot.innerHTML = realAnalysisHtml(data, false, incidentId);
   renderRealLayers(data);
 }
 
