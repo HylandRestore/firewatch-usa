@@ -105,6 +105,7 @@ async function processEnvelope(envelope) {
       merged._lat = geo.lat;
       merged._lon = geo.lon;
       incidents.set(incidentId, merged);
+      const frp = 80 + (data.alarm || 1) * 20;
       await db.upsertIncident({
         id: incidentId,
         source: 'fn_structural',
@@ -114,10 +115,18 @@ async function processEnvelope(envelope) {
         alarm: data.alarm,
         line1: a.line1, city: a.city, county: a.county, state: a.state, zip: a.zipCode,
         lat: geo.lat, lon: geo.lon,
-        frp: 80 + (data.alarm || 1) * 20,
+        frp,
         created_at: data.createdAt, updated_at: data.updatedAt, closed_at: data.closedAt,
         raw_payload: envelope,
       });
+
+      // Prefetch structures-at-risk in the background (fire-and-forget) so
+      // it's usually already cached by the time someone clicks into this
+      // incident. Spreads Overpass calls out at the natural rate incidents
+      // arrive instead of bunching them up around whenever someone happens
+      // to be actively browsing the app.
+      computeStructuresAtRisk({ id: incidentId, lat: geo.lat, lon: geo.lon, frp, created_at: data.createdAt }, 3)
+        .catch(e => console.warn(`[prefetch] structures failed for ${incidentId}:`, e.message));
     }
   }
 }
