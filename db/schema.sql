@@ -114,15 +114,46 @@ create table if not exists model_versions (
   version       text primary key,
   description   text,
   coefficients  jsonb,
+  is_active     boolean not null default false,
   created_at    timestamptz not null default now()
 );
 
-insert into model_versions (version, description, coefficients)
+insert into model_versions (version, description, coefficients, is_active)
 values ('v0-heuristic', 'Initial rudimentary heuristic model, pre-calibration', '{
   "distance_decay": 1.5,
   "intensity_weight": 0.35,
   "duration_weight": 0.15,
   "wind_speed_weight": 0.25,
   "stability_weight": 0.25
-}'::jsonb)
+}'::jsonb, false)
 on conflict (version) do nothing;
+
+-- v1-logistic: replaces the v0 heuristic with a true logistic-regression
+-- probability model (see lib/risk.js for the full citation-backed rationale
+-- per factor). This is the version marked active by default; the future
+-- feedback loop (lib/recalibrate.js) re-fits these weights from real
+-- inspection outcomes and inserts new versions (e.g. v1-learned-2026-08-01),
+-- flipping is_active forward without ever deleting this history.
+insert into model_versions (version, description, coefficients, is_active)
+values ('v1-logistic', 'Logistic smoke-damage probability model — hand-picked priors pending real-feedback calibration', '{
+  "bias": -3.0,
+  "proximity_factor": 3.0,
+  "intensity_norm": 1.2,
+  "duration_norm": 0.8,
+  "wind_norm": 0.6,
+  "wind_prox_interaction": 0.8,
+  "stability_norm": 1.0,
+  "precip_norm": -2.0,
+  "pbl_trap_norm": 1.0,
+  "humidity_norm": 0.3,
+  "vulnerability_centered": 1.5,
+  "fire_type_wildfire": 0.3
+}'::jsonb, true)
+on conflict (version) do update set coefficients = excluded.coefficients, description = excluded.description;
+
+-- Make sure exactly one version is active (in case this file is re-run after
+-- a manual recalibration already promoted a different version — don't stomp
+-- on it).
+update model_versions set is_active = false
+where version <> 'v1-logistic'
+  and (select count(*) from model_versions where is_active = true) > 1;

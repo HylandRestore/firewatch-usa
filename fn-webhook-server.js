@@ -5,6 +5,7 @@ const weather  = require('./lib/weather');
 const structuresLib = require('./lib/structures');
 const smokeCone = require('./lib/smokeCone');
 const risk     = require('./lib/risk');
+const recalibrateLib = require('./lib/recalibrate');
 
 const app         = express();
 const FN_SECRET   = process.env.FN_SECRET || '';
@@ -125,7 +126,7 @@ async function processEnvelope(envelope) {
       // incident. Spreads Overpass calls out at the natural rate incidents
       // arrive instead of bunching them up around whenever someone happens
       // to be actively browsing the app.
-      computeStructuresAtRisk({ id: incidentId, lat: geo.lat, lon: geo.lon, frp, created_at: data.createdAt }, 3)
+      computeStructuresAtRisk({ id: incidentId, lat: geo.lat, lon: geo.lon, frp, created_at: data.createdAt, source: 'fn_structural' })
         .catch(e => console.warn(`[prefetch] structures failed for ${incidentId}:`, e.message));
     }
   }
@@ -200,8 +201,16 @@ function memoryLookup(id) {
   const lon = m._lon ?? m.lon;
   if (typeof lat !== 'number' || typeof lon !== 'number') return null;
   const a = m.address || {};
+  // Which store this came from tells us the fire type (structural vs.
+  // wildfire) — needed by the risk model's fire_type_wildfire feature, since
+  // wildfire and structure-fire smoke aren't the same hazard profile (see
+  // lib/risk.js). Falls back to the synced record's own `source`/`type` for
+  // the wildfire cache, since that's set at /api/incidents/sync time.
+  const source = incidents.has(id)
+    ? 'fn_structural'
+    : (m.source || (m.type === 'structural' ? 'firms_structural' : 'firms_wildfire'));
   return {
-    id, lat, lon,
+    id, lat, lon, source,
     frp: m.frp ?? (80 + (m.alarm || 1) * 20),
     created_at: m.createdAt || m.created_at || new Date().toISOString(),
     incident_type: m.incidentType || m.type || null,
@@ -239,7 +248,7 @@ async function lazyGeocodeFallback(id) {
   });
 
   return {
-    id, lat: geo.lat, lon: geo.lon, frp, created_at: m.createdAt || new Date().toISOString(),
+    id, lat: geo.lat, lon: geo.lon, frp, source: 'fn_structural', created_at: m.createdAt || new Date().toISOString(),
     incident_type: m.incidentType || null, line1: a.line1 || null, city: a.city || null, state: a.state || null, zip: a.zipCode || null,
   };
 }
@@ -272,33 +281,45 @@ app.get('/api/incidents/:id/weather', async (req, res) => {
 });
 
 // ── Smoke cone: couples fire intensity/duration with real wind ───────────
-async function buildSmokeCone(inc, stabilityClass) {
+// stabilityClassOverride: pass an explicit 1-5 to force it (e.g. ?stability=
+// query param, for testing/comparison). Otherwise stability is COMPUTED per
+// incident from real cloud-cover/wind/day-night data via
+// weather.computeStabilityClass — it used to be hard-coded to "neutral"
+// (class 3) for every single fire, which meant the model never actually
+// reflected whether conditions were the calm-clear-night type that trap
+// smoke near the ground vs. a windy, well-mixed afternoon.
+async function buildSmokeCone(inc, stabilityClassOverride) {
   let w;
   try { w = await weather.fetchIncidentWeather(inc.lat, inc.lon, inc.created_at); }
   catch (e) { w = weather.estimateWeather(); }
   const durationHours = (Date.now() - new Date(inc.created_at).getTime()) / 3600000;
+  const stabilityClass = Number.isFinite(stabilityClassOverride) ? stabilityClassOverride
+    : weather.computeStabilityClass({
+        windSpeedMs: w.surface?.wind_speed_ms, cloudCoverPct: w.surface?.cloud_cover_pct,
+        isDay: w.surface?.is_day, shortwaveRadiation: w.surface?.shortwave_radiation,
+      });
   const cone = smokeCone.computeSmokeCone({
     lat: inc.lat, lon: inc.lon, frp: inc.frp, durationHours,
-    weather: w, stabilityClass: stabilityClass || 3,
+    weather: w, stabilityClass,
   });
-  return { cone, weather: w, durationHours };
+  return { cone, weather: w, durationHours, stabilityClass };
 }
 
 app.get('/api/incidents/:id/smoke-cone', async (req, res) => {
   const inc = await lookupIncident(req.params.id);
   if (!inc) return res.status(404).json({ error: 'incident not found' });
-  const stabilityClass = parseInt(req.query.stability) || 3;
-  const { cone, weather: w, durationHours } = await buildSmokeCone(inc, stabilityClass);
-  res.json({ incidentId: inc.id, durationHours, weather: w, ...cone });
+  const stabilityOverride = parseInt(req.query.stability);
+  const { cone, weather: w, durationHours, stabilityClass } = await buildSmokeCone(inc, stabilityOverride);
+  res.json({ incidentId: inc.id, durationHours, stabilityClass, weather: w, ...cone });
 });
 
-// ── Real structures-at-risk (OSM Overpass) + v0 risk scoring ─────────────
+// ── Real structures-at-risk (OSM Overpass) + v1 logistic risk scoring ────
 // Shared by the JSON endpoint and the CSV export so both always agree.
-async function computeStructuresAtRisk(inc, stabilityClass) {
-  const { cone, durationHours } = await buildSmokeCone(inc, stabilityClass);
+async function computeStructuresAtRisk(inc, stabilityClassOverride) {
+  const { cone, durationHours, weather: w, stabilityClass } = await buildSmokeCone(inc, stabilityClassOverride);
   const rawStructures = await structuresLib.fetchStructuresNear(inc.lat, inc.lon, cone.reach_m);
-  const coefficients = await risk.loadCoefficients(db);
-  const modelVersion = 'v0-heuristic';
+  const { version: modelVersion, coefficients } = await risk.loadCoefficients(db);
+  const fireTypeIsWildfire = (inc.source || '').includes('wildfire');
 
   const results = [];
   for (const s of rawStructures) {
@@ -307,10 +328,15 @@ async function computeStructuresAtRisk(inc, stabilityClass) {
     const scored = risk.computeStructureRisk({
       distanceM: distance_m, reachM: cone.reach_m, inCone,
       frpMw: inc.frp, durationHours, windSpeedMs: cone.speed_ms,
-      stabilityClass, buildingType: s.building_type, coefficients,
+      stabilityClass, precipMm: w.surface?.precip_mm, humidityPct: w.surface?.humidity_pct,
+      boundaryLayerHeightM: w.surface?.boundary_layer_height_m, fireTypeIsWildfire,
+      buildingType: s.building_type, coefficients, modelVersion,
     });
     if (!inCone) continue; // only report structures actually inside the plume
-    results.push({ ...s, distance_m, bearing_deg, risk_score: scored.score, risk_tier: scored.tier });
+    results.push({
+      ...s, distance_m, bearing_deg, risk_score: scored.score,
+      probability_pct: scored.probability_pct, risk_tier: scored.tier,
+    });
 
     await db.upsertStructure(s);
     await db.insertRiskAssessment({
@@ -330,10 +356,10 @@ app.get('/api/incidents/:id/structures', async (req, res) => {
     error: 'incident not found',
     reason: 'No location data available for this incident yet — the event carrying its address may not have been received, or geocoding failed.',
   });
-  const stabilityClass = parseInt(req.query.stability) || 3;
+  const stabilityOverride = parseInt(req.query.stability);
 
   try {
-    const { results, cone } = await computeStructuresAtRisk(inc, stabilityClass);
+    const { results, cone } = await computeStructuresAtRisk(inc, stabilityOverride);
     res.json({ incidentId: inc.id, count: results.length, structures: results, cone });
   } catch (e) {
     console.error('[structures] failed:', e.message);
@@ -363,19 +389,19 @@ function formatAffectedAddress(s) {
 app.get('/api/incidents/:id/structures.csv', async (req, res) => {
   const inc = await lookupIncident(req.params.id);
   if (!inc) return res.status(404).send('incident not found — no location data available yet');
-  const stabilityClass = parseInt(req.query.stability) || 3;
+  const stabilityOverride = parseInt(req.query.stability);
 
   try {
-    const { results, cone } = await computeStructuresAtRisk(inc, stabilityClass);
+    const { results, cone } = await computeStructuresAtRisk(inc, stabilityOverride);
     const incidentAddress = [inc.line1, inc.city, inc.state].filter(Boolean).join(', ') || `${inc.lat.toFixed(4)}, ${inc.lon.toFixed(4)}`;
     const header = [
       'incident_address', 'incident_type', 'incident_date',
-      'affected_address', 'building_type', 'distance_m', 'bearing_deg', 'risk_score', 'risk_tier', 'lat', 'lon',
+      'affected_address', 'building_type', 'distance_m', 'bearing_deg', 'smoke_damage_pct', 'risk_tier', 'lat', 'lon',
     ];
     const rows = results.map(s => [
       incidentAddress, inc.incident_type || '', inc.created_at || '',
       formatAffectedAddress(s), s.building_type || '', Math.round(s.distance_m),
-      Math.round(s.bearing_deg), s.risk_score.toFixed(3), s.risk_tier, s.lat, s.lon,
+      Math.round(s.bearing_deg), s.probability_pct, s.risk_tier, s.lat, s.lon,
     ]);
     const csv = [header, ...rows].map(r => r.map(csvEscape).join(',')).join('\n');
 
@@ -399,7 +425,7 @@ app.get('/api/export/structures-at-risk.csv', async (req, res) => {
 
   const header = [
     'incident_address', 'incident_type', 'incident_date', 'incident_status',
-    'affected_address', 'building_type', 'distance_m', 'bearing_deg', 'risk_score', 'risk_tier',
+    'affected_address', 'building_type', 'distance_m', 'bearing_deg', 'smoke_damage_pct', 'risk_tier',
     'lat', 'lon', 'computed_at',
   ];
   const csvRows = rows.map(r => {
@@ -410,7 +436,7 @@ app.get('/api/export/structures-at-risk.csv', async (req, res) => {
       incidentAddress, i.incident_type || '', i.created_at || '', i.status || '',
       formatAffectedAddress(s), s.building_type || '',
       r.distance_m != null ? Math.round(r.distance_m) : '', r.bearing_deg != null ? Math.round(r.bearing_deg) : '',
-      r.risk_score, r.risk_tier, s.lat ?? '', s.lon ?? '', r.computed_at,
+      r.risk_score != null ? Math.round(r.risk_score * 1000) / 10 : '', r.risk_tier, s.lat ?? '', s.lon ?? '', r.computed_at,
     ];
   });
   const csv = [header, ...csvRows].map(row => row.map(csvEscape).join(',')).join('\n');
@@ -429,6 +455,41 @@ app.post('/api/feedback', jsonBody, async (req, res) => {
   const row = await db.insertFeedback({ incident_structure_id, damage_observed, damage_severity, notes, source: 'manual' });
   if (!row) return res.status(503).json({ error: 'no database configured — set DATABASE_URL to enable feedback storage' });
   res.json({ ok: true, id: row.id });
+});
+
+// ── Model status + recalibration (the "continually learn" loop) ─────────
+// Shows what's currently live and how much ground-truth feedback exists to
+// learn from — useful for a CRM view showing "model confidence" over time.
+app.get('/api/model/status', async (req, res) => {
+  if (!db.isEnabled()) return res.status(503).json({ error: 'no database configured' });
+  const active = await db.getActiveModelVersion();
+  const trainingRows = await db.getTrainingData(50000);
+  const usable = trainingRows ? recalibrateLib.extractTrainingPairs(trainingRows).X.length : 0;
+  res.json({
+    active_version: active?.version || 'v1-logistic (default, not yet persisted)',
+    description: active?.description || null,
+    active_since: active?.created_at || null,
+    feedback_rows_total: trainingRows ? trainingRows.length : 0,
+    feedback_rows_usable_for_training: usable,
+    min_samples_needed_to_recalibrate: recalibrateLib.MIN_SAMPLES,
+    ready_to_recalibrate: usable >= recalibrateLib.MIN_SAMPLES,
+  });
+});
+
+// Triggers a refit. Call this after a batch of CRM inspection results has
+// been logged via /api/feedback — it's not automatic/scheduled by design,
+// since you'll want to decide when there's enough new ground truth to be
+// worth re-fitting on (the endpoint itself reports if there isn't enough
+// yet, via the `skipped` field, rather than silently doing nothing).
+app.post('/api/model/recalibrate', async (req, res) => {
+  if (!db.isEnabled()) return res.status(503).json({ error: 'no database configured' });
+  try {
+    const result = await recalibrateLib.recalibrate(db);
+    res.json(result);
+  } catch (e) {
+    console.error('[recalibrate] failed:', e.message);
+    res.status(500).json({ error: 'recalibration failed', detail: e.message });
+  }
 });
 
 app.get('/health', (req, res) => {
