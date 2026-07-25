@@ -348,6 +348,18 @@ function csvEscape(v) {
   return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 
+// OSM doesn't tag every building with an address. Rather than leaving the
+// cell blank (which reads as an error), label it clearly, and if we found a
+// nearby addressed building to associate it with (see attachNearestAddress
+// in lib/structures.js), include that so unaddressed structures visibly
+// group under whichever known address they're actually next to.
+function formatAffectedAddress(s) {
+  if (s.address) return s.address;
+  if (s.name) return s.name;
+  if (s.near_address) return `Structure - no address (near ${s.near_address})`;
+  return 'Structure - no address';
+}
+
 app.get('/api/incidents/:id/structures.csv', async (req, res) => {
   const inc = await lookupIncident(req.params.id);
   if (!inc) return res.status(404).send('incident not found — no location data available yet');
@@ -362,7 +374,7 @@ app.get('/api/incidents/:id/structures.csv', async (req, res) => {
     ];
     const rows = results.map(s => [
       incidentAddress, inc.incident_type || '', inc.created_at || '',
-      s.address || s.name || '', s.building_type || '', Math.round(s.distance_m),
+      formatAffectedAddress(s), s.building_type || '', Math.round(s.distance_m),
       Math.round(s.bearing_deg), s.risk_score.toFixed(3), s.risk_tier, s.lat, s.lon,
     ]);
     const csv = [header, ...rows].map(r => r.map(csvEscape).join(',')).join('\n');
@@ -396,7 +408,7 @@ app.get('/api/export/structures-at-risk.csv', async (req, res) => {
     const incidentAddress = [i.line1, i.city, i.state].filter(Boolean).join(', ');
     return [
       incidentAddress, i.incident_type || '', i.created_at || '', i.status || '',
-      s.address || '', s.building_type || '',
+      formatAffectedAddress(s), s.building_type || '',
       r.distance_m != null ? Math.round(r.distance_m) : '', r.bearing_deg != null ? Math.round(r.bearing_deg) : '',
       r.risk_score, r.risk_tier, s.lat ?? '', s.lon ?? '', r.computed_at,
     ];

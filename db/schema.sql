@@ -62,6 +62,8 @@ create table if not exists structures (
   building_type   text,                       -- OSM building=* tag
   name            text,
   address         text,
+  near_address    text,                       -- nearest addressed building's address, when this one has none
+  near_address_distance_m numeric,
   fetched_at      timestamptz not null default now()
 );
 create index if not exists idx_structures_latlon on structures(lat, lon);

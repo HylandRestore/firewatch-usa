@@ -801,7 +801,8 @@ function renderStructureLayer(structData) {
   (structData.structures || []).forEach(s => {
     const c = s.risk_tier === 'High' ? '#FF1744' : s.risk_tier === 'Moderate' ? '#FF6B00' : '#FFB800';
     const m = L.circleMarker([s.lat, s.lon], { radius:5, color:'#0a0a0f', fillColor:c, fillOpacity:.9, weight:1.5 });
-    m.bindTooltip(`${s.building_type||'Structure'}${s.address?': '+s.address:''}<br>${s.risk_tier} risk — ${(s.risk_score*100).toFixed(0)}% damage chance<br>${(s.distance_m/1000).toFixed(2)}km from source`,{sticky:true});
+    const addrLabel = s.address || (s.near_address ? `Structure — no address (near ${s.near_address})` : 'Structure — no address');
+    m.bindTooltip(`${s.building_type||'Structure'}: ${addrLabel}<br>${s.risk_tier} risk — ${(s.risk_score*100).toFixed(0)}% damage chance<br>${(s.distance_m/1000).toFixed(2)}km from source`,{sticky:true});
     layers.realStruct.addLayer(m);
   });
 }
@@ -826,7 +827,7 @@ function structuresStatusHtml(structData, loading, incidentId) {
   const top = s.slice(0,6).map(x=>`
     <div class="titem">
       <div class="fn-struct-icon" style="background:${x.risk_tier==='High'?'#FF1744':x.risk_tier==='Moderate'?'#FF6B00':'#FFB800'}"></div>
-      ${(x.risk_score*100).toFixed(0)}% — ${x.building_type||'structure'}${x.address?' · '+x.address:''} · ${(x.distance_m/1000).toFixed(1)}km
+      ${(x.risk_score*100).toFixed(0)}% — ${x.building_type||'structure'} · ${x.address || (x.near_address ? 'near '+x.near_address : 'no address')} · ${(x.distance_m/1000).toFixed(1)}km
     </div>`).join('');
   const csvUrl = `${FN_SERVER}/api/incidents/${encodeURIComponent(incidentId)}/structures.csv?stability=${$('stab-class').value}`;
   return `<div class="tsect">
