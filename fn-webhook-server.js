@@ -365,6 +365,33 @@ app.get('/api/incidents/:id/structures.csv', async (req, res) => {
   }
 });
 
+// ── Full export: every structure ever found inside any smoke cone ────────
+// The aggregate "houses that may be damaged" record across ALL incidents,
+// not just one fire at a time. Reads straight from Supabase, so it needs
+// persistence configured — it's a report on historical data, not a live
+// computation.
+app.get('/api/export/structures-at-risk.csv', async (req, res) => {
+  const rows = await db.allRiskAssessments(parseInt(req.query.limit) || 5000);
+  if (rows === null) return res.status(503).send('No database configured — set SUPABASE_URL/SUPABASE_KEY to enable this export.');
+
+  const header = ['address', 'building_type', 'lat', 'lon', 'incident_type', 'incident_city', 'incident_state', 'incident_status', 'incident_created_at', 'distance_m', 'bearing_deg', 'risk_score', 'risk_tier', 'computed_at'];
+  const csvRows = rows.map(r => {
+    const s = r.structures || {};
+    const i = r.incidents || {};
+    return [
+      s.address || '', s.building_type || '', s.lat ?? '', s.lon ?? '',
+      i.incident_type || '', i.city || '', i.state || '', i.status || '', i.created_at || '',
+      r.distance_m != null ? Math.round(r.distance_m) : '', r.bearing_deg != null ? Math.round(r.bearing_deg) : '',
+      r.risk_score, r.risk_tier, r.computed_at,
+    ];
+  });
+  const csv = [header, ...csvRows].map(row => row.map(csvEscape).join(',')).join('\n');
+
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="firewatch-all-structures-at-risk.csv"`);
+  res.send(csv);
+});
+
 // ── Feedback loop stub (manual today, Monday.com-fed later) ──────────────
 // Record what actually happened at a structure so future model versions can
 // be calibrated against ground truth instead of just the v0 heuristic.
