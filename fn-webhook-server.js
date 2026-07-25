@@ -333,17 +333,23 @@ async function computeStructuresAtRisk(inc, stabilityClassOverride) {
       buildingType: s.building_type, coefficients, modelVersion,
     });
     if (!inCone) continue; // only report structures actually inside the plume
-    results.push({
-      ...s, distance_m, bearing_deg, risk_score: scored.score,
-      probability_pct: scored.probability_pct, risk_tier: scored.tier,
-    });
 
     await db.upsertStructure(s);
-    await db.insertRiskAssessment({
+    const incidentStructureId = await db.insertRiskAssessment({
       incident_id: inc.id, structure_id: s.id, distance_m, bearing_deg,
       wind_dir_deg: cone.dir_deg, wind_speed_ms: cone.speed_ms, stability_class: stabilityClass,
       smoke_cone_reach_m: cone.reach_m, in_cone: inCone, risk_score: scored.score,
       risk_tier: scored.tier, model_version: modelVersion, inputs: scored.inputs,
+    });
+
+    // incident_structure_id is what the future CRM feedback loop references
+    // (POST /api/feedback) to report what an inspection actually found at
+    // this specific structure/fire pairing — has to be surfaced here, not
+    // just written to the DB, or there'd be no way to report back on it.
+    results.push({
+      ...s, distance_m, bearing_deg, risk_score: scored.score,
+      probability_pct: scored.probability_pct, risk_tier: scored.tier,
+      incident_structure_id: incidentStructureId,
     });
   }
   results.sort((a, b) => b.risk_score - a.risk_score);
@@ -397,11 +403,13 @@ app.get('/api/incidents/:id/structures.csv', async (req, res) => {
     const header = [
       'incident_address', 'incident_type', 'incident_date',
       'affected_address', 'building_type', 'distance_m', 'bearing_deg', 'smoke_damage_pct', 'risk_tier', 'lat', 'lon',
+      'incident_structure_id',
     ];
     const rows = results.map(s => [
       incidentAddress, inc.incident_type || '', inc.created_at || '',
       formatAffectedAddress(s), s.building_type || '', Math.round(s.distance_m),
       Math.round(s.bearing_deg), s.probability_pct, s.risk_tier, s.lat, s.lon,
+      s.incident_structure_id ?? '',
     ]);
     const csv = [header, ...rows].map(r => r.map(csvEscape).join(',')).join('\n');
 
@@ -426,7 +434,7 @@ app.get('/api/export/structures-at-risk.csv', async (req, res) => {
   const header = [
     'incident_address', 'incident_type', 'incident_date', 'incident_status',
     'affected_address', 'building_type', 'distance_m', 'bearing_deg', 'smoke_damage_pct', 'risk_tier',
-    'lat', 'lon', 'computed_at',
+    'lat', 'lon', 'computed_at', 'incident_structure_id',
   ];
   const csvRows = rows.map(r => {
     const s = r.structures || {};
@@ -437,6 +445,7 @@ app.get('/api/export/structures-at-risk.csv', async (req, res) => {
       formatAffectedAddress(s), s.building_type || '',
       r.distance_m != null ? Math.round(r.distance_m) : '', r.bearing_deg != null ? Math.round(r.bearing_deg) : '',
       r.risk_score != null ? Math.round(r.risk_score * 1000) / 10 : '', r.risk_tier, s.lat ?? '', s.lon ?? '', r.computed_at,
+      r.id ?? '',
     ];
   });
   const csv = [header, ...csvRows].map(row => row.map(csvEscape).join(',')).join('\n');
