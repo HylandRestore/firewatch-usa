@@ -199,10 +199,13 @@ function memoryLookup(id) {
   const lat = m._lat ?? m.lat;
   const lon = m._lon ?? m.lon;
   if (typeof lat !== 'number' || typeof lon !== 'number') return null;
+  const a = m.address || {};
   return {
     id, lat, lon,
     frp: m.frp ?? (80 + (m.alarm || 1) * 20),
     created_at: m.createdAt || m.created_at || new Date().toISOString(),
+    incident_type: m.incidentType || m.type || null,
+    line1: a.line1 || null, city: a.city || null, state: a.state || null, zip: a.zipCode || null,
   };
 }
 
@@ -235,7 +238,10 @@ async function lazyGeocodeFallback(id) {
     raw_payload: m,
   });
 
-  return { id, lat: geo.lat, lon: geo.lon, frp, created_at: m.createdAt || new Date().toISOString() };
+  return {
+    id, lat: geo.lat, lon: geo.lon, frp, created_at: m.createdAt || new Date().toISOString(),
+    incident_type: m.incidentType || null, line1: a.line1 || null, city: a.city || null, state: a.state || null, zip: a.zipCode || null,
+  };
 }
 
 async function lookupIncident(id) {
@@ -349,9 +355,14 @@ app.get('/api/incidents/:id/structures.csv', async (req, res) => {
 
   try {
     const { results, cone } = await computeStructuresAtRisk(inc, stabilityClass);
-    const header = ['address', 'city_or_name', 'building_type', 'distance_m', 'bearing_deg', 'risk_score', 'risk_tier', 'lat', 'lon'];
+    const incidentAddress = [inc.line1, inc.city, inc.state].filter(Boolean).join(', ') || `${inc.lat.toFixed(4)}, ${inc.lon.toFixed(4)}`;
+    const header = [
+      'incident_address', 'incident_type', 'incident_date',
+      'affected_address', 'building_type', 'distance_m', 'bearing_deg', 'risk_score', 'risk_tier', 'lat', 'lon',
+    ];
     const rows = results.map(s => [
-      s.address || '', s.name || '', s.building_type || '', Math.round(s.distance_m),
+      incidentAddress, inc.incident_type || '', inc.created_at || '',
+      s.address || s.name || '', s.building_type || '', Math.round(s.distance_m),
       Math.round(s.bearing_deg), s.risk_score.toFixed(3), s.risk_tier, s.lat, s.lon,
     ]);
     const csv = [header, ...rows].map(r => r.map(csvEscape).join(',')).join('\n');
@@ -374,15 +385,20 @@ app.get('/api/export/structures-at-risk.csv', async (req, res) => {
   const rows = await db.allRiskAssessments(parseInt(req.query.limit) || 5000);
   if (rows === null) return res.status(503).send('No database configured — set SUPABASE_URL/SUPABASE_KEY to enable this export.');
 
-  const header = ['address', 'building_type', 'lat', 'lon', 'incident_type', 'incident_city', 'incident_state', 'incident_status', 'incident_created_at', 'distance_m', 'bearing_deg', 'risk_score', 'risk_tier', 'computed_at'];
+  const header = [
+    'incident_address', 'incident_type', 'incident_date', 'incident_status',
+    'affected_address', 'building_type', 'distance_m', 'bearing_deg', 'risk_score', 'risk_tier',
+    'lat', 'lon', 'computed_at',
+  ];
   const csvRows = rows.map(r => {
     const s = r.structures || {};
     const i = r.incidents || {};
+    const incidentAddress = [i.line1, i.city, i.state].filter(Boolean).join(', ');
     return [
-      s.address || '', s.building_type || '', s.lat ?? '', s.lon ?? '',
-      i.incident_type || '', i.city || '', i.state || '', i.status || '', i.created_at || '',
+      incidentAddress, i.incident_type || '', i.created_at || '', i.status || '',
+      s.address || '', s.building_type || '',
       r.distance_m != null ? Math.round(r.distance_m) : '', r.bearing_deg != null ? Math.round(r.bearing_deg) : '',
-      r.risk_score, r.risk_tier, r.computed_at,
+      r.risk_score, r.risk_tier, s.lat ?? '', s.lon ?? '', r.computed_at,
     ];
   });
   const csv = [header, ...csvRows].map(row => row.map(csvEscape).join(',')).join('\n');
