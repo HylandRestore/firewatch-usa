@@ -428,8 +428,16 @@ app.get('/api/incidents/:id/structures.csv', async (req, res) => {
 // persistence configured — it's a report on historical data, not a live
 // computation.
 app.get('/api/export/structures-at-risk.csv', async (req, res) => {
+  if (!db.isEnabled()) return res.status(503).send('No database configured — set SUPABASE_URL/SUPABASE_KEY to enable this export.');
   const rows = await db.allRiskAssessments(parseInt(req.query.limit) || 5000);
-  if (rows === null) return res.status(503).send('No database configured — set SUPABASE_URL/SUPABASE_KEY to enable this export.');
+  if (rows === null) {
+    return res.status(502).send(
+      'Database is connected, but this query failed — check the Render logs for a line starting ' +
+      '"[db] GET incident_structures" for the exact Supabase/PostgREST error. The most common cause ' +
+      'after running an ALTER TABLE is a stale PostgREST schema cache: in Supabase, go to ' +
+      'Project Settings -> API -> "Reload schema cache" (or run NOTIFY pgrst, \'reload schema\'; in the SQL Editor).'
+    );
+  }
 
   const header = [
     'incident_address', 'incident_type', 'incident_date', 'incident_status',
