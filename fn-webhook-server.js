@@ -6,6 +6,7 @@ const structuresLib = require('./lib/structures');
 const smokeCone = require('./lib/smokeCone');
 const risk     = require('./lib/risk');
 const recalibrateLib = require('./lib/recalibrate');
+const xlsxExport = require('./lib/xlsxExport');
 
 const app         = express();
 const FN_SECRET   = process.env.FN_SECRET || '';
@@ -427,40 +428,88 @@ app.get('/api/incidents/:id/structures.csv', async (req, res) => {
 // not just one fire at a time. Reads straight from Supabase, so it needs
 // persistence configured — it's a report on historical data, not a live
 // computation.
-app.get('/api/export/structures-at-risk.csv', async (req, res) => {
-  if (!db.isEnabled()) return res.status(503).send('No database configured — set SUPABASE_URL/SUPABASE_KEY to enable this export.');
+// Shared row-shaping for the aggregate export, used by both the CSV and
+// XLSX versions so they never drift apart. Returns plain named fields
+// instead of an array so lib/xlsxExport.js can read them directly.
+function shapeAggregateRow(r) {
+  const s = r.structures || {};
+  const i = r.incidents || {};
+  return {
+    incident_address: [i.line1, i.city, i.state].filter(Boolean).join(', '),
+    incident_type: i.incident_type || '',
+    incident_date: i.created_at || '',
+    incident_status: i.status || '',
+    affected_address: formatAffectedAddress(s),
+    building_type: s.building_type || '',
+    distance_m: r.distance_m != null ? Math.round(r.distance_m) : null,
+    bearing_deg: r.bearing_deg != null ? Math.round(r.bearing_deg) : null,
+    smoke_damage_pct: r.risk_score != null ? Math.round(r.risk_score * 1000) / 10 : null,
+    risk_tier: r.risk_tier || '',
+    lat: s.lat ?? null,
+    lon: s.lon ?? null,
+    computed_at: r.computed_at || '',
+    incident_structure_id: r.id ?? '',
+  };
+}
+
+async function loadAggregateRows(req, res) {
+  if (!db.isEnabled()) {
+    res.status(503).send('No database configured — set SUPABASE_URL/SUPABASE_KEY to enable this export.');
+    return null;
+  }
   const rows = await db.allRiskAssessments(parseInt(req.query.limit) || 5000);
   if (rows === null) {
-    return res.status(502).send(
+    res.status(502).send(
       'Database is connected, but this query failed — check the Render logs for a line starting ' +
       '"[db] GET incident_structures" for the exact Supabase/PostgREST error. The most common cause ' +
       'after running an ALTER TABLE is a stale PostgREST schema cache: in Supabase, go to ' +
       'Project Settings -> API -> "Reload schema cache" (or run NOTIFY pgrst, \'reload schema\'; in the SQL Editor).'
     );
+    return null;
   }
+  return rows.map(shapeAggregateRow);
+}
+
+app.get('/api/export/structures-at-risk.csv', async (req, res) => {
+  const shaped = await loadAggregateRows(req, res);
+  if (!shaped) return; // response already sent by loadAggregateRows
 
   const header = [
     'incident_address', 'incident_type', 'incident_date', 'incident_status',
     'affected_address', 'building_type', 'distance_m', 'bearing_deg', 'smoke_damage_pct', 'risk_tier',
     'lat', 'lon', 'computed_at', 'incident_structure_id',
   ];
-  const csvRows = rows.map(r => {
-    const s = r.structures || {};
-    const i = r.incidents || {};
-    const incidentAddress = [i.line1, i.city, i.state].filter(Boolean).join(', ');
-    return [
-      incidentAddress, i.incident_type || '', i.created_at || '', i.status || '',
-      formatAffectedAddress(s), s.building_type || '',
-      r.distance_m != null ? Math.round(r.distance_m) : '', r.bearing_deg != null ? Math.round(r.bearing_deg) : '',
-      r.risk_score != null ? Math.round(r.risk_score * 1000) / 10 : '', r.risk_tier, s.lat ?? '', s.lon ?? '', r.computed_at,
-      r.id ?? '',
-    ];
-  });
+  const csvRows = shaped.map(r => [
+    r.incident_address, r.incident_type, r.incident_date, r.incident_status,
+    r.affected_address, r.building_type, r.distance_m ?? '', r.bearing_deg ?? '',
+    r.smoke_damage_pct ?? '', r.risk_tier, r.lat ?? '', r.lon ?? '', r.computed_at, r.incident_structure_id,
+  ]);
   const csv = [header, ...csvRows].map(row => row.map(csvEscape).join(',')).join('\n');
 
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', `attachment; filename="firewatch-all-structures-at-risk.csv"`);
   res.send(csv);
+});
+
+// Same report as a real formatted spreadsheet: incident info blank-repeats
+// after the first row of each group (with row-banding as a backup grouping
+// cue in case the sheet gets re-sorted), and rows with a real affected
+// address are bold + tier-colored so they visually stand out from bare OSM
+// building footprints that never got an address tag.
+app.get('/api/export/structures-at-risk.xlsx', async (req, res) => {
+  const shaped = await loadAggregateRows(req, res);
+  if (!shaped) return;
+
+  try {
+    const wb = await xlsxExport.buildStructuresWorkbook(shaped);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="firewatch-all-structures-at-risk.xlsx"`);
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (e) {
+    console.error('[structures.xlsx] failed:', e.message);
+    if (!res.headersSent) res.status(500).send('xlsx export failed: ' + e.message);
+  }
 });
 
 // ── Feedback loop stub (manual today, Monday.com-fed later) ──────────────
